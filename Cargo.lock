@@ -994,7 +994,11 @@ dependencies = [
 name = "anvil-reth"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "alloy-rpc-types-anvil",
+ "alloy-rpc-types-eth",
  "eyre",
+ "jsonrpsee",
  "reth-ethereum",
  "tokio",
 ]
