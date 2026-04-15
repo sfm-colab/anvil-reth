@@ -994,6 +994,7 @@ dependencies = [
 name = "anvil-reth"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
  "alloy-primitives",
  "alloy-rpc-types-anvil",
  "alloy-rpc-types-eth",

@@ -1,10 +1,9 @@
+use crate::impersonation::ImpersonationState;
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_anvil::{Forking, Metadata, MineOptions, NodeInfo};
 use alloy_rpc_types_eth::Block;
 use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
-use std::collections::HashSet;
-use std::sync::{Arc, RwLock};
 
 /// anvil_* RPC namespace.
 ///
@@ -120,41 +119,32 @@ pub trait AnvilApi {
     async fn anvil_remove_pool_transactions(&self, address: Address) -> RpcResult<()>;
 }
 
-/// Shared state for impersonated accounts.
-#[derive(Debug, Default)]
-struct AnvilState {
-    impersonated: HashSet<Address>,
-    auto_impersonate: bool,
-}
-
 /// Implementation of the `anvil_*` RPC namespace.
 #[derive(Debug, Clone)]
 pub struct AnvilRpc {
-    state: Arc<RwLock<AnvilState>>,
+    state: ImpersonationState,
 }
 
 impl AnvilRpc {
-    pub fn new() -> Self {
-        Self {
-            state: Arc::new(RwLock::new(AnvilState::default())),
-        }
+    pub fn new(state: ImpersonationState) -> Self {
+        Self { state }
     }
 }
 
 #[async_trait]
 impl AnvilApiServer for AnvilRpc {
     async fn anvil_impersonate_account(&self, address: Address) -> RpcResult<()> {
-        self.state.write().unwrap().impersonated.insert(address);
+        self.state.impersonate(address);
         Ok(())
     }
 
     async fn anvil_stop_impersonating_account(&self, address: Address) -> RpcResult<()> {
-        self.state.write().unwrap().impersonated.remove(&address);
+        self.state.stop_impersonating(address);
         Ok(())
     }
 
     async fn anvil_auto_impersonate_account(&self, enabled: bool) -> RpcResult<()> {
-        self.state.write().unwrap().auto_impersonate = enabled;
+        self.state.set_auto_impersonate(enabled);
         Ok(())
     }
 
