@@ -6,5 +6,7 @@ edition = "2021"
 [dependencies]
 reth-ethereum = { git = "https://github.com/paradigmxyz/reth", features = ["node", "node-api", "test-utils"] }
 
+jsonrpsee = { version = "0.26", features = ["server", "macros"] }
+alloy-primitives = "1.5"
 tokio = { version = "1", features = ["full"] }
 eyre = "0.6"
