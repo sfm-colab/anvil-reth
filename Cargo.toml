@@ -1,0 +1,10 @@
+[package]
+name = "anvil-reth"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+reth-ethereum = { git = "https://github.com/paradigmxyz/reth", features = ["node", "node-api", "test-utils"] }
+
+tokio = { version = "1", features = ["full"] }
+eyre = "0.6"
