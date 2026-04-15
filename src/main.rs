@@ -22,7 +22,7 @@ async fn main() -> eyre::Result<()> {
         .with_types::<EthereumNode>()
         .with_components(EthereumNode::components().network(NoopNetworkBuilder::eth()))
         .with_add_ons(EthereumAddOns::default())
-        .launch()
+        .launch_with_debug_capabilities()
         .await?;
 
     println!(
