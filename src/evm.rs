@@ -20,23 +20,29 @@ use std::{
     fmt::{self, Debug, Display, Formatter},
 };
 
-/// Wraps the standard [`EthEvmConfig`] and overrides sender recovery for
-/// impersonated transactions during engine payload execution.
+/// Wraps an inner EVM config and overrides sender recovery for impersonated
+/// transactions during engine payload execution.
 #[derive(Debug, Clone)]
-pub struct AnvilEvmConfig<C: Clone + Debug> {
-    inner: EthEvmConfig<C>,
+pub struct AnvilEvmConfig<Evm> {
+    inner: Evm,
     state: ImpersonationState,
 }
 
-impl<C: Clone + Debug> ConfigureEvm for AnvilEvmConfig<C>
+impl<Evm> AnvilEvmConfig<Evm> {
+    pub const fn new(inner: Evm, state: ImpersonationState) -> Self {
+        Self { inner, state }
+    }
+}
+
+impl<Evm> ConfigureEvm for AnvilEvmConfig<Evm>
 where
-    EthEvmConfig<C>: ConfigureEvm<Primitives = EthPrimitives>,
+    Evm: ConfigureEvm<Primitives = EthPrimitives>,
 {
-    type Primitives = <EthEvmConfig<C> as ConfigureEvm>::Primitives;
-    type Error = <EthEvmConfig<C> as ConfigureEvm>::Error;
-    type NextBlockEnvCtx = <EthEvmConfig<C> as ConfigureEvm>::NextBlockEnvCtx;
-    type BlockExecutorFactory = <EthEvmConfig<C> as ConfigureEvm>::BlockExecutorFactory;
-    type BlockAssembler = <EthEvmConfig<C> as ConfigureEvm>::BlockAssembler;
+    type Primitives = <Evm as ConfigureEvm>::Primitives;
+    type Error = <Evm as ConfigureEvm>::Error;
+    type NextBlockEnvCtx = <Evm as ConfigureEvm>::NextBlockEnvCtx;
+    type BlockExecutorFactory = <Evm as ConfigureEvm>::BlockExecutorFactory;
+    type BlockAssembler = <Evm as ConfigureEvm>::BlockAssembler;
 
     fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {
         self.inner.block_executor_factory()
@@ -89,10 +95,9 @@ impl Display for TxConvertError {
 
 impl Error for TxConvertError {}
 
-impl<C: Clone + Debug> ConfigureEngineEvm<ExecutionData> for AnvilEvmConfig<C>
+impl<Evm> ConfigureEngineEvm<ExecutionData> for AnvilEvmConfig<Evm>
 where
-    EthEvmConfig<C>:
-        ConfigureEvm<Primitives = EthPrimitives> + ConfigureEngineEvm<ExecutionData>,
+    Evm: ConfigureEvm<Primitives = EthPrimitives> + ConfigureEngineEvm<ExecutionData>,
 {
     fn evm_env_for_payload(
         &self,
@@ -148,12 +153,12 @@ where
     EthEvmConfig<Types::ChainSpec>:
         ConfigureEvm<Primitives = EthPrimitives> + ConfigureEngineEvm<ExecutionData>,
 {
-    type EVM = AnvilEvmConfig<Types::ChainSpec>;
+    type EVM = AnvilEvmConfig<EthEvmConfig<Types::ChainSpec>>;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> Result<Self::EVM> {
-        Ok(AnvilEvmConfig {
-            inner: EthEvmConfig::new(ctx.chain_spec()),
-            state: self.state,
-        })
+        Ok(AnvilEvmConfig::new(
+            EthEvmConfig::new(ctx.chain_spec()),
+            self.state,
+        ))
     }
 }
