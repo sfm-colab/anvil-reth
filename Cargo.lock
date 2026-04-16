@@ -998,6 +998,7 @@ dependencies = [
  "eyre",
  "jsonrpsee",
  "reth-ethereum",
+ "reth-transaction-pool",
  "tokio",
 ]
 

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 reth-ethereum = { git = "https://github.com/paradigmxyz/reth", features = ["node", "node-api", "test-utils"] }
+reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth" }
 
 jsonrpsee = { version = "0.26", features = ["server", "macros"] }
 alloy-primitives = "1.5"
