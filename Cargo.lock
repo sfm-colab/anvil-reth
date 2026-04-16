@@ -999,6 +999,7 @@ dependencies = [
  "alloy-eips 2.0.0",
  "alloy-network",
  "alloy-primitives",
+ "alloy-rpc-types-anvil",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
  "alloy-signer",

@@ -1,6 +1,9 @@
+use crate::block_source::BlockSource;
 use crate::impersonation::ImpersonationState;
 use crate::mining::MiningController;
 use alloy_primitives::{Address, B256, U256};
+use alloy_rpc_types_anvil::MineOptions;
+use alloy_rpc_types_eth::Block;
 use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::{
@@ -48,6 +51,9 @@ pub trait AnvilApi {
     #[method(name = "mine", aliases = ["hardhat_mine"])]
     async fn anvil_mine(&self, num_blocks: Option<U256>, interval: Option<U256>) -> RpcResult<()>;
 
+    #[method(name = "mine_detailed", aliases = ["evm_mine_detailed"])]
+    async fn anvil_mine_detailed(&self, opts: Option<MineOptions>) -> RpcResult<Vec<Block>>;
+
     #[method(name = "dropTransaction")]
     async fn anvil_drop_transaction(&self, tx_hash: B256) -> RpcResult<Option<B256>>;
 
@@ -63,25 +69,28 @@ pub trait AnvilApi {
 
 /// Implementation of the `anvil_*` RPC namespace.
 #[derive(Debug, Clone)]
-pub struct AnvilRpc<Pool, Provider> {
+pub struct AnvilRpc<Pool, Provider, Blocks> {
     state: ImpersonationState,
     mining: MiningController,
     pool: Pool,
     provider: Provider,
+    blocks: Blocks,
 }
 
-impl<Pool, Provider> AnvilRpc<Pool, Provider> {
+impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks> {
     pub fn new(
         state: ImpersonationState,
         mining: MiningController,
         pool: Pool,
         provider: Provider,
+        blocks: Blocks,
     ) -> Self {
         Self {
             state,
             mining,
             pool,
             provider,
+            blocks,
         }
     }
 }
@@ -94,9 +103,10 @@ fn invalid_params(message: impl Into<String>) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(INVALID_PARAMS_CODE, message.into(), None::<()>)
 }
 
-impl<Pool, Provider> AnvilRpc<Pool, Provider>
+impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks>
 where
     Provider: BlockNumReader,
+    Blocks: BlockSource<Block = Block>,
 {
     async fn wait_for_block_number(&self, expected: u64) -> RpcResult<()> {
         for _ in 0..100 {
@@ -113,13 +123,37 @@ where
             "timed out waiting for block {expected}"
         )))
     }
+
+    fn best_block_number(&self) -> RpcResult<u64> {
+        self.provider
+            .best_block_number()
+            .map_err(|error| internal_error(format!("failed to read latest block number: {error}")))
+    }
+
+    async fn mine_blocks(&self, blocks: u64) -> RpcResult<Vec<u64>> {
+        if blocks == 0 {
+            return Ok(Vec::new());
+        }
+
+        let start = self.best_block_number()?;
+
+        for _ in 0..blocks {
+            self.mining.trigger();
+        }
+
+        let end = start.saturating_add(blocks);
+        self.wait_for_block_number(end).await?;
+
+        Ok(((start + 1)..=end).collect())
+    }
 }
 
 #[async_trait]
-impl<Pool, Provider> AnvilApiServer for AnvilRpc<Pool, Provider>
+impl<Pool, Provider, Blocks> AnvilApiServer for AnvilRpc<Pool, Provider, Blocks>
 where
     Pool: TransactionPool + Send + Sync + 'static,
     Provider: BlockNumReader + Send + Sync + 'static,
+    Blocks: BlockSource<Block = Block>,
 {
     async fn anvil_impersonate_account(&self, address: Address) -> RpcResult<()> {
         self.state.impersonate(address);
@@ -163,20 +197,35 @@ where
         }
 
         let blocks = num_blocks.unwrap_or(U256::from(1)).to::<u64>();
-        if blocks == 0 {
-            return Ok(());
+        self.mine_blocks(blocks).await?;
+        Ok(())
+    }
+
+    async fn anvil_mine_detailed(&self, opts: Option<MineOptions>) -> RpcResult<Vec<Block>> {
+        let (timestamp, blocks) = match opts.unwrap_or_default() {
+            MineOptions::Options { timestamp, blocks } => (timestamp, blocks.unwrap_or(1)),
+            MineOptions::Timestamp(timestamp) => (timestamp, 1),
+        };
+
+        if timestamp.is_some() {
+            return Err(invalid_params(
+                "anvil_mine_detailed timestamp is not supported yet",
+            ));
         }
 
-        let start = self.provider.best_block_number().map_err(|error| {
-            internal_error(format!("failed to read latest block number: {error}"))
-        })?;
+        let mined_blocks = self.mine_blocks(blocks).await?;
+        let mut blocks = Vec::with_capacity(mined_blocks.len());
 
-        for _ in 0..blocks {
-            self.mining.trigger();
+        for block_number in mined_blocks {
+            let block = self
+                .blocks
+                .block_by_number_full(block_number)
+                .await?
+                .ok_or_else(|| internal_error(format!("missing mined block {block_number}")))?;
+            blocks.push(block);
         }
 
-        self.wait_for_block_number(start.saturating_add(blocks))
-            .await
+        Ok(blocks)
     }
 
     async fn anvil_drop_transaction(&self, tx_hash: B256) -> RpcResult<Option<B256>> {
