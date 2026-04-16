@@ -26,7 +26,7 @@ async fn main() -> eyre::Result<()> {
         .with_components(EthereumNode::components().network(NoopNetworkBuilder::eth()))
         .with_add_ons(EthereumAddOns::default())
         .extend_rpc_modules(|ctx| {
-            ctx.modules.merge_configured(AnvilRpc::new().into_rpc())?;
+            ctx.modules.merge_configured(AnvilRpc::new(ctx.pool().clone()).into_rpc())?;
             Ok(())
         })
         .launch_with_debug_capabilities()

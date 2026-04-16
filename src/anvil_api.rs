@@ -1,6 +1,7 @@
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
+use reth_transaction_pool::TransactionPool;
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 
@@ -22,6 +23,15 @@ pub trait AnvilApi {
     #[method(name = "getAutomine")]
     async fn anvil_get_automine(&self) -> RpcResult<bool>;
 
+    #[method(name = "dropTransaction")]
+    async fn anvil_drop_transaction(&self, tx_hash: B256) -> RpcResult<Option<B256>>;
+
+    #[method(name = "dropAllTransactions")]
+    async fn anvil_drop_all_transactions(&self) -> RpcResult<()>;
+
+    #[method(name = "removePoolTransactions")]
+    async fn anvil_remove_pool_transactions(&self, address: Address) -> RpcResult<()>;
+
     #[method(name = "setLoggingEnabled")]
     async fn anvil_set_logging_enabled(&self, enabled: bool) -> RpcResult<()>;
 }
@@ -35,20 +45,25 @@ struct AnvilState {
 
 /// Implementation of the `anvil_*` RPC namespace.
 #[derive(Debug, Clone)]
-pub struct AnvilRpc {
+pub struct AnvilRpc<Pool> {
     state: Arc<RwLock<AnvilState>>,
+    pool: Pool,
 }
 
-impl AnvilRpc {
-    pub fn new() -> Self {
+impl<Pool> AnvilRpc<Pool> {
+    pub fn new(pool: Pool) -> Self {
         Self {
             state: Arc::new(RwLock::new(AnvilState::default())),
+            pool,
         }
     }
 }
 
 #[async_trait]
-impl AnvilApiServer for AnvilRpc {
+impl<Pool> AnvilApiServer for AnvilRpc<Pool>
+where
+    Pool: TransactionPool + Send + Sync + 'static,
+{
     async fn anvil_impersonate_account(&self, address: Address) -> RpcResult<()> {
         self.state.write().unwrap().impersonated.insert(address);
         Ok(())
@@ -66,6 +81,23 @@ impl AnvilApiServer for AnvilRpc {
 
     async fn anvil_get_automine(&self) -> RpcResult<bool> {
         Ok(true)
+    }
+
+    async fn anvil_drop_transaction(&self, tx_hash: B256) -> RpcResult<Option<B256>> {
+        Ok(self.pool.remove_transaction(tx_hash).map(|_| tx_hash))
+    }
+
+    async fn anvil_drop_all_transactions(&self) -> RpcResult<()> {
+        let hashes = self.pool.all_transaction_hashes();
+        if !hashes.is_empty() {
+            self.pool.remove_transactions(hashes);
+        }
+        Ok(())
+    }
+
+    async fn anvil_remove_pool_transactions(&self, address: Address) -> RpcResult<()> {
+        self.pool.remove_transactions_by_sender(address);
+        Ok(())
     }
 
     async fn anvil_set_logging_enabled(&self, _enabled: bool) -> RpcResult<()> {
