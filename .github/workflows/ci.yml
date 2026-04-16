@@ -81,7 +81,8 @@ jobs:
           toolchain: stable
       - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo test --workspace
+      - uses: taiki-e/install-action@cargo-nextest
+      - run: cargo nextest run --workspace
 
   docs:
     runs-on: ubuntu-latest
