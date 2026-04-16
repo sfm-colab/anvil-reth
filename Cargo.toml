@@ -2,6 +2,7 @@
 name = "anvil-reth"
 version = "0.1.0"
 edition = "2021"
+publish = false
 
 [dependencies]
 reth-ethereum = { git = "https://github.com/paradigmxyz/reth", features = ["node", "node-api", "test-utils"] }

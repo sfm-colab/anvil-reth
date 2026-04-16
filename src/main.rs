@@ -3,21 +3,25 @@ mod evm;
 mod impersonation;
 mod pool;
 
-use anvil_api::{AnvilApiServer, AnvilRpc};
-use evm::AnvilExecutorBuilder;
-use impersonation::{ImpersonatedSigner, ImpersonationState};
-use pool::AnvilPoolBuilder;
 #[cfg(test)]
 use alloy_network::TransactionBuilder;
 #[cfg(test)]
 use alloy_primitives::{Address, B256, U256};
 #[cfg(test)]
 use alloy_rpc_types_eth::TransactionRequest;
+use anvil_api::{AnvilApiServer, AnvilRpc};
+use evm::AnvilExecutorBuilder;
 use eyre::Result;
 #[cfg(test)]
 use eyre::{bail, OptionExt};
+use impersonation::{ImpersonatedSigner, ImpersonationState};
 #[cfg(test)]
-use jsonrpsee::{core::{client::ClientT, ClientError}, http_client::HttpClient, rpc_params};
+use jsonrpsee::{
+    core::{client::ClientT, ClientError},
+    http_client::HttpClient,
+    rpc_params,
+};
+use pool::AnvilPoolBuilder;
 use reth_ethereum::{
     chainspec::DEV,
     node::{
@@ -153,9 +157,11 @@ async fn explicit_impersonation_allows_eth_send_transaction() -> Result<()> {
     let funder = *dev_accounts
         .first()
         .ok_or_eyre("no dev account available")?;
-    let gas_price: u128 =
-        client.request::<U256, _>("eth_gasPrice", rpc_params![]).await?.to::<u128>() +
-            1_000_000_000u128;
+    let gas_price: u128 = client
+        .request::<U256, _>("eth_gasPrice", rpc_params![])
+        .await?
+        .to::<u128>()
+        + 1_000_000_000u128;
     let target = Address::repeat_byte(0x11);
     let recipient = Address::repeat_byte(0x22);
 

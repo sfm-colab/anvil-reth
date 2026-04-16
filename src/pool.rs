@@ -67,8 +67,13 @@ where
     }
 
     fn on_new_head_block(&self, new_tip_block: &SealedBlock<Self::Block>) {
-        self.state
-            .forget_tx_senders(new_tip_block.body().transactions().iter().map(|tx| *tx.tx_hash()));
+        self.state.forget_tx_senders(
+            new_tip_block
+                .body()
+                .transactions()
+                .iter()
+                .map(|tx| *tx.tx_hash()),
+        );
         self.inner.on_new_head_block(new_tip_block);
     }
 }
@@ -100,11 +105,7 @@ where
 {
     type Pool = AnvilTransactionPool<Node::Provider, Evm>;
 
-    async fn build_pool(
-        self,
-        ctx: &BuilderContext<Node>,
-        evm_config: Evm,
-    ) -> Result<Self::Pool> {
+    async fn build_pool(self, ctx: &BuilderContext<Node>, evm_config: Evm) -> Result<Self::Pool> {
         let pool_config = ctx.pool_config();
         let blob_store = create_blob_store_with_cache(ctx, None)?;
 
@@ -125,8 +126,8 @@ where
             state: state.take().unwrap(),
         });
 
-        Ok(TxPoolBuilder::new(ctx)
+        TxPoolBuilder::new(ctx)
             .with_validator(executor)
-            .build_and_spawn_maintenance_task(blob_store, pool_config)?)
+            .build_and_spawn_maintenance_task(blob_store, pool_config)
     }
 }

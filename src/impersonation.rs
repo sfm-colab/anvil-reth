@@ -1,7 +1,7 @@
 use alloy_consensus::SignableTransaction;
 use alloy_dyn_abi::TypedData;
 use alloy_network::TxSigner;
-use alloy_primitives::{Address, B256, Signature};
+use alloy_primitives::{Address, Signature, B256};
 use alloy_signer::Result as SignerResult;
 use jsonrpsee::core::async_trait;
 use reth_rpc_eth_api::helpers::EthSigner;
