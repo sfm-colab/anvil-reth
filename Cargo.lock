@@ -994,11 +994,22 @@ dependencies = [
 name = "anvil-reth"
 version = "0.1.0"
 dependencies = [
+ "alloy-consensus",
+ "alloy-dyn-abi",
+ "alloy-eips 2.0.0",
+ "alloy-network",
  "alloy-primitives",
+ "alloy-rpc-types-engine",
+ "alloy-rpc-types-eth",
+ "alloy-signer",
  "eyre",
  "jsonrpsee",
  "reth-ethereum",
+ "reth-rpc-eth-api",
+ "reth-rpc-eth-types",
+ "reth-rpc-traits",
  "reth-transaction-pool",
+ "serde_json",
  "tokio",
 ]
 
