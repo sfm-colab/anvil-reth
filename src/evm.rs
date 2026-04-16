@@ -5,12 +5,11 @@ use alloy_primitives::Bytes;
 use alloy_rpc_types_engine::ExecutionData;
 use eyre::Result;
 use reth_ethereum::{
-    Block,
     chainspec::EthereumHardforks,
     evm::{primitives as reth_evm, EthEvmConfig},
     node::builder::{components::ExecutorBuilder, BuilderContext, FullNodeTypes, NodeTypes},
     primitives::{SealedBlock, SealedHeader, SignedTransaction},
-    EthPrimitives, TransactionSigned,
+    Block, EthPrimitives, TransactionSigned,
 };
 use reth_evm::{
     ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
@@ -52,10 +51,7 @@ where
         self.inner.block_assembler()
     }
 
-    fn evm_env(
-        &self,
-        header: &Header,
-    ) -> Result<EvmEnvFor<Self>, Self::Error> {
+    fn evm_env(&self, header: &Header) -> Result<EvmEnvFor<Self>, Self::Error> {
         self.inner.evm_env(header)
     }
 
@@ -99,10 +95,7 @@ impl<Evm> ConfigureEngineEvm<ExecutionData> for AnvilEvmConfig<Evm>
 where
     Evm: ConfigureEvm<Primitives = EthPrimitives> + ConfigureEngineEvm<ExecutionData>,
 {
-    fn evm_env_for_payload(
-        &self,
-        payload: &ExecutionData,
-    ) -> Result<EvmEnvFor<Self>, Self::Error> {
+    fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<EvmEnvFor<Self>, Self::Error> {
         self.inner.evm_env_for_payload(payload)
     }
 
@@ -145,10 +138,7 @@ pub struct AnvilExecutorBuilder {
 
 impl<Types, Node> ExecutorBuilder<Node> for AnvilExecutorBuilder
 where
-    Types: NodeTypes<
-        ChainSpec: EthereumHardforks + Clone + Debug,
-        Primitives = EthPrimitives,
-    >,
+    Types: NodeTypes<ChainSpec: EthereumHardforks + Clone + Debug, Primitives = EthPrimitives>,
     Node: FullNodeTypes<Types = Types>,
     EthEvmConfig<Types::ChainSpec>:
         ConfigureEvm<Primitives = EthPrimitives> + ConfigureEngineEvm<ExecutionData>,
