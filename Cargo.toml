@@ -5,13 +5,14 @@ edition = "2021"
 publish = false
 
 [dependencies]
-reth-ethereum = { git = "https://github.com/paradigmxyz/reth", features = ["node", "node-api", "test-utils"] }
-reth-engine-local = { git = "https://github.com/paradigmxyz/reth" }
-reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth" }
-reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth" }
+reth-db-mem = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
+reth-ethereum = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem", features = ["node", "node-api", "test-utils"] }
+reth-engine-local = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
+reth-rpc-eth-api = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
+reth-rpc-eth-types = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
 reth-rpc-traits = "0.3"
-reth-storage-api = { git = "https://github.com/paradigmxyz/reth" }
-reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth" }
+reth-storage-api = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
+reth-transaction-pool = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
 
 alloy-consensus = "2"
 alloy-dyn-abi = "1.5"
@@ -24,6 +25,7 @@ alloy-primitives = "1.5"
 alloy-rpc-types-engine = "2"
 alloy-rpc-types-eth = "2"
 alloy-signer = "2"
+tempfile = "3"
 tokio = { version = "1", features = ["full"] }
 eyre = "0.6"
 
