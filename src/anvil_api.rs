@@ -1,6 +1,7 @@
 use crate::block_source::BlockSource;
 use crate::impersonation::ImpersonationState;
 use crate::mining::MiningController;
+use crate::time::TimeManager;
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_anvil::MineOptions;
@@ -69,6 +70,12 @@ pub trait AnvilApi {
 
     #[method(name = "getGenesisTime")]
     async fn anvil_get_genesis_time(&self) -> RpcResult<u64>;
+
+    #[method(name = "setBlockTimestampInterval")]
+    async fn anvil_set_block_timestamp_interval(&self, seconds: u64) -> RpcResult<()>;
+
+    #[method(name = "removeBlockTimestampInterval")]
+    async fn anvil_remove_block_timestamp_interval(&self) -> RpcResult<bool>;
 }
 
 /// Implementation of the `anvil_*` RPC namespace.
@@ -76,6 +83,7 @@ pub trait AnvilApi {
 pub struct AnvilRpc<Pool, Provider, Blocks> {
     state: ImpersonationState,
     mining: MiningController,
+    time: TimeManager,
     pool: Pool,
     provider: Provider,
     blocks: Blocks,
@@ -85,6 +93,7 @@ impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks> {
     pub fn new(
         state: ImpersonationState,
         mining: MiningController,
+        time: TimeManager,
         pool: Pool,
         provider: Provider,
         blocks: Blocks,
@@ -92,6 +101,7 @@ impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks> {
         Self {
             state,
             mining,
+            time,
             pool,
             provider,
             blocks,
@@ -269,5 +279,14 @@ where
             .map_err(|e| internal_error(format!("failed to read genesis header: {e}")))?
             .ok_or_else(|| internal_error("genesis block not found"))?;
         Ok(header.timestamp())
+    }
+
+    async fn anvil_set_block_timestamp_interval(&self, seconds: u64) -> RpcResult<()> {
+        self.time.set_block_timestamp_interval(seconds);
+        Ok(())
+    }
+
+    async fn anvil_remove_block_timestamp_interval(&self) -> RpcResult<bool> {
+        Ok(self.time.remove_block_timestamp_interval())
     }
 }

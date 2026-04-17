@@ -4,6 +4,7 @@ mod evm;
 mod impersonation;
 mod mining;
 mod pool;
+mod time;
 
 #[cfg(test)]
 use alloy_network::{TransactionBuilder, TransactionResponse};
@@ -27,6 +28,7 @@ use jsonrpsee::{
 };
 use mining::{run_automine_task, run_interval_mining_task, MiningController};
 use pool::AnvilPoolBuilder;
+use time::TimeManager;
 use reth_db_mem::MemoryDatabase;
 use reth_engine_local::MiningMode as LocalMiningMode;
 use reth_ethereum::{
@@ -65,6 +67,7 @@ async fn main() -> Result<()> {
         });
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
+    let time = TimeManager::default();
     let trigger_stream = mining.trigger_stream();
     let NodeHandle {
         node,
@@ -87,6 +90,7 @@ async fn main() -> Result<()> {
         .extend_rpc_modules({
             let impersonation = impersonation.clone();
             let mining = mining.clone();
+            let time = time.clone();
             move |ctx| {
                 ctx.registry
                     .eth_api()
@@ -97,6 +101,7 @@ async fn main() -> Result<()> {
                     AnvilRpc::new(
                         impersonation,
                         mining,
+                        time,
                         ctx.pool().clone(),
                         ctx.provider().clone(),
                         ctx.registry.eth_api().clone(),
@@ -234,6 +239,7 @@ async fn explicit_impersonation_allows_eth_send_transaction() -> Result<()> {
                     AnvilRpc::new(
                         impersonation,
                         mining,
+                        TimeManager::default(),
                         ctx.pool().clone(),
                         ctx.provider().clone(),
                         ctx.registry.eth_api().clone(),
@@ -356,6 +362,7 @@ async fn set_automine_controls_transaction_mining() -> Result<()> {
                     AnvilRpc::new(
                         impersonation,
                         mining,
+                        TimeManager::default(),
                         ctx.pool().clone(),
                         ctx.provider().clone(),
                         ctx.registry.eth_api().clone(),
@@ -485,6 +492,7 @@ async fn anvil_mine_advances_requested_blocks() -> Result<()> {
                     AnvilRpc::new(
                         impersonation,
                         mining,
+                        TimeManager::default(),
                         ctx.pool().clone(),
                         ctx.provider().clone(),
                         ctx.registry.eth_api().clone(),
@@ -571,6 +579,7 @@ async fn set_interval_mining_controls_block_production() -> Result<()> {
                     AnvilRpc::new(
                         impersonation,
                         mining,
+                        TimeManager::default(),
                         ctx.pool().clone(),
                         ctx.provider().clone(),
                         ctx.registry.eth_api().clone(),
@@ -733,6 +742,7 @@ async fn anvil_mine_detailed_returns_full_blocks() -> Result<()> {
                     AnvilRpc::new(
                         impersonation,
                         mining,
+                        TimeManager::default(),
                         ctx.pool().clone(),
                         ctx.provider().clone(),
                         ctx.registry.eth_api().clone(),
@@ -835,6 +845,119 @@ async fn anvil_mine_detailed_returns_full_blocks() -> Result<()> {
         err.to_string()
             .contains("anvil_mine_detailed timestamp is not supported yet"),
         "unexpected error: {err:?}",
+    );
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn anvil_set_and_remove_block_timestamp_interval() -> Result<()> {
+    let runtime = Runtime::test();
+    let node_config = test_node_config();
+    let impersonation = ImpersonationState::default();
+    let mining = MiningController::default();
+    let trigger_stream = mining.trigger_stream();
+
+    let NodeHandle { node, .. } = NodeBuilder::new(node_config)
+        .with_database(Arc::new(MemoryDatabase::new()))
+        .with_launch_context(runtime.clone())
+        .with_types::<EthereumNode>()
+        .with_components(
+            EthereumNode::components()
+                .network(NoopNetworkBuilder::eth())
+                .pool(AnvilPoolBuilder {
+                    state: impersonation.clone(),
+                })
+                .executor(AnvilExecutorBuilder {
+                    state: impersonation.clone(),
+                }),
+        )
+        .with_add_ons(EthereumAddOns::default())
+        .extend_rpc_modules({
+            let impersonation = impersonation.clone();
+            let mining = mining.clone();
+            move |ctx| {
+                ctx.registry
+                    .eth_api()
+                    .signers()
+                    .write()
+                    .push(Box::new(ImpersonatedSigner::new(impersonation.clone())));
+                ctx.modules.merge_configured(
+                    AnvilRpc::new(
+                        impersonation,
+                        mining,
+                        TimeManager::default(),
+                        ctx.pool().clone(),
+                        ctx.provider().clone(),
+                        ctx.registry.eth_api().clone(),
+                    )
+                    .into_rpc(),
+                )?;
+                Ok(())
+            }
+        })
+        .launch_with_debug_capabilities()
+        .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
+        .await?;
+
+    node.task_executor.spawn_critical_task(
+        "anvil automine control",
+        run_automine_task(node.pool.clone(), mining.clone()),
+    );
+    node.task_executor.spawn_critical_task(
+        "anvil interval mining control",
+        run_interval_mining_task(mining.clone()),
+    );
+
+    let client = node
+        .rpc_server_handles
+        .rpc
+        .http_client()
+        .ok_or_eyre("http rpc client not available")?;
+
+    let removed: bool = client
+        .request("anvil_removeBlockTimestampInterval", rpc_params![])
+        .await?;
+    assert!(!removed, "should return false when no interval is set");
+
+    client
+        .request::<(), _>("anvil_setBlockTimestampInterval", rpc_params![10u64])
+        .await?;
+
+    let removed: bool = client
+        .request("anvil_removeBlockTimestampInterval", rpc_params![])
+        .await?;
+    assert!(removed, "should return true when an interval was removed");
+
+    let removed: bool = client
+        .request("anvil_removeBlockTimestampInterval", rpc_params![])
+        .await?;
+    assert!(
+        !removed,
+        "should return false after interval was already removed"
+    );
+
+    // setting twice overwrites rather than stacking
+    client
+        .request::<(), _>("anvil_setBlockTimestampInterval", rpc_params![10u64])
+        .await?;
+
+    client
+        .request::<(), _>("anvil_setBlockTimestampInterval", rpc_params![20u64])
+        .await?;
+
+    let removed: bool = client
+        .request("anvil_removeBlockTimestampInterval", rpc_params![])
+        .await?;
+    assert!(removed, "should return true after overwritten interval");
+
+    let removed: bool = client
+        .request("anvil_removeBlockTimestampInterval", rpc_params![])
+        .await?;
+    assert!(
+        !removed,
+        "should return false — second set overwrote, not stacked"
     );
 
     Ok(())
