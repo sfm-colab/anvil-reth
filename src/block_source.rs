@@ -16,7 +16,7 @@ pub trait BlockSource: Clone + Send + Sync + 'static {
 #[async_trait]
 impl<Eth> BlockSource for Eth
 where
-    Eth: FullEthApiServer<NetworkTypes = Ethereum> + Send + Sync + 'static,
+    Eth: FullEthApiServer<NetworkTypes = Ethereum> + 'static,
 {
     type Block = Block;
 
