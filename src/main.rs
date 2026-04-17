@@ -27,12 +27,17 @@ use jsonrpsee::{
 };
 use mining::{run_automine_task, run_interval_mining_task, MiningController};
 use pool::AnvilPoolBuilder;
+use reth_db_mem::MemoryDatabase;
 use reth_engine_local::MiningMode as LocalMiningMode;
 use reth_ethereum::{
     chainspec::DEV,
     node::{
         builder::{components::NoopNetworkBuilder, NodeBuilder, NodeHandle},
-        core::{args::RpcServerArgs, node_config::NodeConfig},
+        core::{
+            args::{DatadirArgs, RpcServerArgs},
+            dirs::{DataDirPath, MaybePlatformPath},
+            node_config::NodeConfig,
+        },
         node::EthereumAddOns,
         EthereumNode,
     },
@@ -40,6 +45,7 @@ use reth_ethereum::{
 };
 #[cfg(test)]
 use serde_json::Value;
+use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
 #[cfg(test)]
@@ -48,10 +54,15 @@ use tokio::time::sleep;
 #[tokio::main]
 async fn main() -> Result<()> {
     let runtime = Runtime::test();
+    let datadir = MaybePlatformPath::<DataDirPath>::from(tempfile::tempdir()?.keep());
     let node_config = NodeConfig::test()
         .with_chain(DEV.clone())
         .dev()
-        .with_rpc(RpcServerArgs::default().with_http());
+        .with_rpc(RpcServerArgs::default().with_http())
+        .with_datadir_args(DatadirArgs {
+            datadir,
+            ..Default::default()
+        });
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
     let trigger_stream = mining.trigger_stream();
@@ -59,7 +70,8 @@ async fn main() -> Result<()> {
         node,
         node_exit_future,
     } = NodeBuilder::new(node_config)
-        .testing_node(runtime)
+        .with_database(Arc::new(MemoryDatabase::new()))
+        .with_launch_context(runtime.clone())
         .with_types::<EthereumNode>()
         .with_components(
             EthereumNode::components()
@@ -173,19 +185,30 @@ async fn wait_for_block_number(client: &HttpClient, expected: u64) -> Result<()>
 }
 
 #[cfg(test)]
+fn test_node_config() -> NodeConfig<reth_ethereum::chainspec::ChainSpec> {
+    let datadir = MaybePlatformPath::<DataDirPath>::from(tempfile::tempdir().unwrap().keep());
+    NodeConfig::test()
+        .with_chain(DEV.clone())
+        .dev()
+        .with_rpc(RpcServerArgs::default().with_unused_ports().with_http())
+        .with_datadir_args(DatadirArgs {
+            datadir,
+            ..Default::default()
+        })
+}
+
+#[cfg(test)]
 #[tokio::test]
 async fn explicit_impersonation_allows_eth_send_transaction() -> Result<()> {
     let runtime = Runtime::test();
-    let node_config = NodeConfig::test()
-        .with_chain(DEV.clone())
-        .dev()
-        .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
+    let node_config = test_node_config();
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
     let trigger_stream = mining.trigger_stream();
 
     let NodeHandle { node, .. } = NodeBuilder::new(node_config)
-        .testing_node(runtime)
+        .with_database(Arc::new(MemoryDatabase::new()))
+        .with_launch_context(runtime.clone())
         .with_types::<EthereumNode>()
         .with_components(
             EthereumNode::components()
@@ -300,16 +323,14 @@ async fn explicit_impersonation_allows_eth_send_transaction() -> Result<()> {
 #[tokio::test]
 async fn set_automine_controls_transaction_mining() -> Result<()> {
     let runtime = Runtime::test();
-    let node_config = NodeConfig::test()
-        .with_chain(DEV.clone())
-        .dev()
-        .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
+    let node_config = test_node_config();
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
     let trigger_stream = mining.trigger_stream();
 
     let NodeHandle { node, .. } = NodeBuilder::new(node_config)
-        .testing_node(runtime)
+        .with_database(Arc::new(MemoryDatabase::new()))
+        .with_launch_context(runtime.clone())
         .with_types::<EthereumNode>()
         .with_components(
             EthereumNode::components()
@@ -431,16 +452,14 @@ async fn set_automine_controls_transaction_mining() -> Result<()> {
 #[tokio::test]
 async fn anvil_mine_advances_requested_blocks() -> Result<()> {
     let runtime = Runtime::test();
-    let node_config = NodeConfig::test()
-        .with_chain(DEV.clone())
-        .dev()
-        .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
+    let node_config = test_node_config();
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
     let trigger_stream = mining.trigger_stream();
 
     let NodeHandle { node, .. } = NodeBuilder::new(node_config)
-        .testing_node(runtime)
+        .with_database(Arc::new(MemoryDatabase::new()))
+        .with_launch_context(runtime.clone())
         .with_types::<EthereumNode>()
         .with_components(
             EthereumNode::components()
@@ -519,16 +538,14 @@ async fn anvil_mine_advances_requested_blocks() -> Result<()> {
 #[tokio::test]
 async fn set_interval_mining_controls_block_production() -> Result<()> {
     let runtime = Runtime::test();
-    let node_config = NodeConfig::test()
-        .with_chain(DEV.clone())
-        .dev()
-        .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
+    let node_config = test_node_config();
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
     let trigger_stream = mining.trigger_stream();
 
     let NodeHandle { node, .. } = NodeBuilder::new(node_config)
-        .testing_node(runtime)
+        .with_database(Arc::new(MemoryDatabase::new()))
+        .with_launch_context(runtime.clone())
         .with_types::<EthereumNode>()
         .with_components(
             EthereumNode::components()
@@ -683,16 +700,14 @@ async fn set_interval_mining_controls_block_production() -> Result<()> {
 #[tokio::test]
 async fn anvil_mine_detailed_returns_full_blocks() -> Result<()> {
     let runtime = Runtime::test();
-    let node_config = NodeConfig::test()
-        .with_chain(DEV.clone())
-        .dev()
-        .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
+    let node_config = test_node_config();
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
     let trigger_stream = mining.trigger_stream();
 
     let NodeHandle { node, .. } = NodeBuilder::new(node_config)
-        .testing_node(runtime)
+        .with_database(Arc::new(MemoryDatabase::new()))
+        .with_launch_context(runtime.clone())
         .with_types::<EthereumNode>()
         .with_components(
             EthereumNode::components()
