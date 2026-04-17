@@ -1,15 +1,18 @@
 mod anvil_api;
+mod block_source;
 mod evm;
 mod impersonation;
 mod mining;
 mod pool;
 
 #[cfg(test)]
-use alloy_network::TransactionBuilder;
+use alloy_network::{TransactionBuilder, TransactionResponse};
 #[cfg(test)]
 use alloy_primitives::{Address, B256, U256};
 #[cfg(test)]
-use alloy_rpc_types_eth::TransactionRequest;
+use alloy_rpc_types_anvil::MineOptions;
+#[cfg(test)]
+use alloy_rpc_types_eth::{Block, TransactionRequest};
 use anvil_api::{AnvilApiServer, AnvilRpc};
 use evm::AnvilExecutorBuilder;
 use eyre::Result;
@@ -84,6 +87,7 @@ async fn main() -> Result<()> {
                         mining,
                         ctx.pool().clone(),
                         ctx.provider().clone(),
+                        ctx.registry.eth_api().clone(),
                     )
                     .into_rpc(),
                 )?;
@@ -209,6 +213,7 @@ async fn explicit_impersonation_allows_eth_send_transaction() -> Result<()> {
                         mining,
                         ctx.pool().clone(),
                         ctx.provider().clone(),
+                        ctx.registry.eth_api().clone(),
                     )
                     .into_rpc(),
                 )?;
@@ -332,6 +337,7 @@ async fn set_automine_controls_transaction_mining() -> Result<()> {
                         mining,
                         ctx.pool().clone(),
                         ctx.provider().clone(),
+                        ctx.registry.eth_api().clone(),
                     )
                     .into_rpc(),
                 )?;
@@ -462,6 +468,7 @@ async fn anvil_mine_advances_requested_blocks() -> Result<()> {
                         mining,
                         ctx.pool().clone(),
                         ctx.provider().clone(),
+                        ctx.registry.eth_api().clone(),
                     )
                     .into_rpc(),
                 )?;
@@ -549,6 +556,7 @@ async fn set_interval_mining_controls_block_production() -> Result<()> {
                         mining,
                         ctx.pool().clone(),
                         ctx.provider().clone(),
+                        ctx.registry.eth_api().clone(),
                     )
                     .into_rpc(),
                 )?;
@@ -667,6 +675,152 @@ async fn set_interval_mining_controls_block_production() -> Result<()> {
         .request::<(), _>("anvil_mine", rpc_params![U256::from(1), U256::ZERO])
         .await?;
     wait_for_receipt(&client, tx_hash).await?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn anvil_mine_detailed_returns_full_blocks() -> Result<()> {
+    let runtime = Runtime::test();
+    let node_config = NodeConfig::test()
+        .with_chain(DEV.clone())
+        .dev()
+        .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
+    let impersonation = ImpersonationState::default();
+    let mining = MiningController::default();
+    let trigger_stream = mining.trigger_stream();
+
+    let NodeHandle { node, .. } = NodeBuilder::new(node_config)
+        .testing_node(runtime)
+        .with_types::<EthereumNode>()
+        .with_components(
+            EthereumNode::components()
+                .network(NoopNetworkBuilder::eth())
+                .pool(AnvilPoolBuilder {
+                    state: impersonation.clone(),
+                })
+                .executor(AnvilExecutorBuilder {
+                    state: impersonation.clone(),
+                }),
+        )
+        .with_add_ons(EthereumAddOns::default())
+        .extend_rpc_modules({
+            let impersonation = impersonation.clone();
+            let mining = mining.clone();
+            move |ctx| {
+                ctx.registry
+                    .eth_api()
+                    .signers()
+                    .write()
+                    .push(Box::new(ImpersonatedSigner::new(impersonation.clone())));
+                ctx.modules.merge_configured(
+                    AnvilRpc::new(
+                        impersonation,
+                        mining,
+                        ctx.pool().clone(),
+                        ctx.provider().clone(),
+                        ctx.registry.eth_api().clone(),
+                    )
+                    .into_rpc(),
+                )?;
+                Ok(())
+            }
+        })
+        .launch_with_debug_capabilities()
+        .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
+        .await?;
+
+    node.task_executor.spawn_critical_task(
+        "anvil automine control",
+        run_automine_task(node.pool.clone(), mining.clone()),
+    );
+    node.task_executor.spawn_critical_task(
+        "anvil interval mining control",
+        run_interval_mining_task(mining.clone()),
+    );
+
+    let client = node
+        .rpc_server_handles
+        .rpc
+        .http_client()
+        .ok_or_eyre("http rpc client not available")?;
+
+    client
+        .request::<(), _>("evm_setAutomine", rpc_params![false])
+        .await?;
+
+    let dev_accounts: Vec<Address> = client.request("eth_accounts", rpc_params![]).await?;
+    let funder = *dev_accounts
+        .first()
+        .ok_or_eyre("no dev account available")?;
+    let gas_price: u128 = client
+        .request::<U256, _>("eth_gasPrice", rpc_params![])
+        .await?
+        .to::<u128>()
+        + 1_000_000_000u128;
+    let tx = TransactionRequest::default()
+        .with_from(funder)
+        .with_to(Address::repeat_byte(0x77))
+        .with_gas_price(gas_price)
+        .with_value(U256::from(1));
+    let tx_hash: B256 = client
+        .request("eth_sendTransaction", rpc_params![tx])
+        .await?;
+
+    let initial_block = block_number(&client).await?;
+    let blocks: Vec<Block> = client
+        .request(
+            "anvil_mine_detailed",
+            rpc_params![MineOptions::Options {
+                timestamp: None,
+                blocks: Some(2),
+            }],
+        )
+        .await?;
+
+    assert_eq!(
+        blocks.len(),
+        2,
+        "should return the requested number of blocks"
+    );
+    assert_eq!(blocks[0].number(), initial_block + 1);
+    assert_eq!(blocks[1].number(), initial_block + 2);
+
+    let first_block_txs = blocks[0]
+        .transactions
+        .as_transactions()
+        .ok_or_eyre("anvil_mine_detailed should return full transactions")?;
+    assert_eq!(
+        first_block_txs.len(),
+        1,
+        "pending tx should be mined into first block"
+    );
+    assert_eq!(first_block_txs[0].tx_hash(), tx_hash);
+
+    let second_block_txs = blocks[1]
+        .transactions
+        .as_transactions()
+        .ok_or_eyre("anvil_mine_detailed should return full transactions")?;
+    assert!(
+        second_block_txs.is_empty(),
+        "second block should be empty when there are no pending txs",
+    );
+
+    wait_for_receipt(&client, tx_hash).await?;
+
+    let err: ClientError = client
+        .request::<Vec<Block>, _>(
+            "evm_mine_detailed",
+            rpc_params![MineOptions::Timestamp(Some(1))],
+        )
+        .await
+        .expect_err("timestamp option should fail until timestamp controls exist");
+    assert!(
+        err.to_string()
+            .contains("anvil_mine_detailed timestamp is not supported yet"),
+        "unexpected error: {err:?}",
+    );
 
     Ok(())
 }
