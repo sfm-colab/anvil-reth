@@ -142,6 +142,9 @@ where
         }
 
         let end = start.saturating_add(blocks);
+        // TODO(anvil): This assumes dev mining advances canon one block at a time with no
+        // intervening head changes, which is fine for the current local-dev path but should be
+        // revisited if manual mining ever needs stronger block attribution guarantees.
         self.wait_for_block_number(end).await?;
 
         Ok(((start + 1)..=end).collect())
