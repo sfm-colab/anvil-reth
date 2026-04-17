@@ -1,6 +1,7 @@
 use crate::block_source::BlockSource;
 use crate::impersonation::ImpersonationState;
 use crate::mining::MiningController;
+use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_anvil::MineOptions;
 use alloy_rpc_types_eth::Block;
@@ -10,7 +11,7 @@ use jsonrpsee::types::{
     error::{INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE},
     ErrorObjectOwned,
 };
-use reth_storage_api::BlockNumReader;
+use reth_storage_api::{BlockNumReader, HeaderProvider};
 use reth_transaction_pool::TransactionPool;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -65,6 +66,9 @@ pub trait AnvilApi {
 
     #[method(name = "setLoggingEnabled")]
     async fn anvil_set_logging_enabled(&self, enabled: bool) -> RpcResult<()>;
+
+    #[method(name = "getGenesisTime")]
+    async fn anvil_get_genesis_time(&self) -> RpcResult<u64>;
 }
 
 /// Implementation of the `anvil_*` RPC namespace.
@@ -155,7 +159,7 @@ where
 impl<Pool, Provider, Blocks> AnvilApiServer for AnvilRpc<Pool, Provider, Blocks>
 where
     Pool: TransactionPool + Send + Sync + 'static,
-    Provider: BlockNumReader + Send + Sync + 'static,
+    Provider: BlockNumReader + HeaderProvider + Send + Sync + 'static,
     Blocks: BlockSource<Block = Block>,
 {
     async fn anvil_impersonate_account(&self, address: Address) -> RpcResult<()> {
@@ -256,5 +260,14 @@ where
 
     async fn anvil_set_logging_enabled(&self, _enabled: bool) -> RpcResult<()> {
         Ok(())
+    }
+
+    async fn anvil_get_genesis_time(&self) -> RpcResult<u64> {
+        let header = self
+            .provider
+            .sealed_header(0)
+            .map_err(|e| internal_error(format!("failed to read genesis header: {e}")))?
+            .ok_or_else(|| internal_error("genesis block not found"))?;
+        Ok(header.timestamp())
     }
 }
