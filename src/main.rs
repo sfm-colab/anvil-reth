@@ -28,7 +28,6 @@ use jsonrpsee::{
 };
 use mining::{run_automine_task, run_interval_mining_task, MiningController};
 use pool::AnvilPoolBuilder;
-use time::TimeManager;
 use reth_db_mem::MemoryDatabase;
 use reth_engine_local::MiningMode as LocalMiningMode;
 use reth_ethereum::{
@@ -50,6 +49,7 @@ use serde_json::Value;
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
+use time::TimeManager;
 #[cfg(test)]
 use tokio::time::sleep;
 
