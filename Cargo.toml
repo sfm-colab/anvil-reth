@@ -5,14 +5,14 @@ edition = "2021"
 publish = false
 
 [dependencies]
-reth-db-mem = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
-reth-ethereum = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem", features = ["node", "node-api", "test-utils"] }
-reth-engine-local = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
-reth-rpc-eth-api = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
-reth-rpc-eth-types = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
+reth-db-mem = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
+reth-ethereum = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth", features = ["node", "node-api", "test-utils"] }
+reth-engine-local = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
+reth-rpc-eth-api = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
+reth-rpc-eth-types = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
 reth-rpc-traits = "0.3"
-reth-storage-api = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
-reth-transaction-pool = { git = "https://github.com/sfm-colab/reth", branch = "feat/db-mem" }
+reth-storage-api = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
+reth-transaction-pool = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
 
 alloy-consensus = "2"
 alloy-dyn-abi = "1.5"
