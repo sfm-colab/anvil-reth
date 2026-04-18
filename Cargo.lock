@@ -1006,6 +1006,7 @@ dependencies = [
  "eyre",
  "futures-util",
  "jsonrpsee",
+ "parking_lot",
  "reth-db-mem",
  "reth-engine-local",
  "reth-ethereum",
