@@ -1,9 +1,11 @@
 use crate::{
     anvil_api::{AnvilApiServer, AnvilRpc},
+    eth_builder::anvil_add_ons,
     evm::AnvilExecutorBuilder,
     impersonation::{ImpersonatedSigner, ImpersonationState},
     mining::{run_automine_task, run_interval_mining_task, MiningController},
     pool::AnvilPoolBuilder,
+    state::AnvilState,
     time::TimeManager,
 };
 use eyre::{OptionExt, Result};
@@ -11,22 +13,24 @@ use jsonrpsee::http_client::HttpClient;
 use reth_db_mem::MemoryDatabase;
 use reth_engine_local::MiningMode as LocalMiningMode;
 use reth_ethereum::{
-    chainspec::DEV,
+    chainspec::{ChainSpec, DEV},
     node::{
-        builder::{components::NoopNetworkBuilder, NodeBuilder, NodeHandle},
+        builder::{
+            components::NoopNetworkBuilder,
+            NodeBuilder, NodeHandle,
+        },
         core::{
             args::{DatadirArgs, RpcServerArgs, StorageArgs},
             dirs::{DataDirPath, MaybePlatformPath},
             node_config::NodeConfig,
         },
-        node::EthereumAddOns,
         EthereumNode,
     },
     tasks::Runtime,
 };
 use std::{future::Future, sync::Arc};
 
-fn test_node_config() -> NodeConfig<reth_ethereum::chainspec::ChainSpec> {
+fn test_node_config() -> NodeConfig<ChainSpec> {
     let datadir = MaybePlatformPath::<DataDirPath>::from(tempfile::tempdir().unwrap().keep());
     NodeConfig::test()
         .with_chain(DEV.clone())
@@ -48,6 +52,7 @@ where
     let node_config = test_node_config();
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
+    let anvil_state = AnvilState::shared();
     let trigger_stream = mining.trigger_stream();
 
     let NodeHandle { node, .. } = NodeBuilder::new(node_config)
@@ -64,10 +69,11 @@ where
                     state: impersonation.clone(),
                 }),
         )
-        .with_add_ons(EthereumAddOns::default())
+        .with_add_ons(anvil_add_ons(Arc::clone(&anvil_state)))
         .extend_rpc_modules({
             let impersonation = impersonation.clone();
             let mining = mining.clone();
+            let anvil_state = Arc::clone(&anvil_state);
             move |ctx| {
                 ctx.registry
                     .eth_api()
@@ -79,6 +85,7 @@ where
                         impersonation,
                         mining,
                         TimeManager::default(),
+                        anvil_state,
                         ctx.pool().clone(),
                         ctx.provider().clone(),
                         ctx.registry.eth_api().clone(),
