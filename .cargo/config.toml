@@ -1,0 +1,4 @@
+[target.'cfg(target_os = "macos")']
+# Match the size reduction from `strip -S -x` at link time so a plain
+# `cargo build --release` already emits the smaller artifact on macOS.
+rustflags = ["-Clink-arg=-Wl,-S", "-Clink-arg=-Wl,-x"]

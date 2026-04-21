@@ -15,7 +15,7 @@ use reth_ethereum::{
     node::{
         builder::{components::NoopNetworkBuilder, NodeBuilder, NodeHandle},
         core::{
-            args::{DatadirArgs, RpcServerArgs},
+            args::{DatadirArgs, RpcServerArgs, StorageArgs},
             dirs::{DataDirPath, MaybePlatformPath},
             node_config::NodeConfig,
         },
@@ -31,6 +31,7 @@ fn test_node_config() -> NodeConfig<reth_ethereum::chainspec::ChainSpec> {
     NodeConfig::test()
         .with_chain(DEV.clone())
         .dev()
+        .with_storage(StorageArgs { v2: false })
         .with_rpc(RpcServerArgs::default().with_unused_ports().with_http())
         .with_datadir_args(DatadirArgs {
             datadir,
