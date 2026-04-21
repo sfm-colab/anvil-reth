@@ -37,14 +37,14 @@ use reth_ethereum::{
     node::{
         builder::{components::NoopNetworkBuilder, NodeBuilder, NodeHandle},
         core::{
-            args::{DatadirArgs, RpcServerArgs},
+            args::{DatadirArgs, RpcServerArgs, StorageArgs},
             dirs::{DataDirPath, MaybePlatformPath},
             node_config::NodeConfig,
         },
         node::EthereumAddOns,
         EthereumNode,
     },
-    tasks::Runtime,
+    tasks::{RuntimeBuilder, RuntimeConfig},
 };
 #[cfg(test)]
 use serde_json::Value;
@@ -59,11 +59,12 @@ use tokio::time::sleep;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let runtime = Runtime::test();
+    let runtime = RuntimeBuilder::new(RuntimeConfig::default()).build()?;
     let datadir = MaybePlatformPath::<DataDirPath>::from(tempfile::tempdir()?.keep());
-    let node_config = NodeConfig::test()
-        .with_chain(DEV.clone())
+    let node_config = NodeConfig::new(DEV.clone())
+        .with_unused_ports()
         .dev()
+        .with_storage(StorageArgs { v2: false })
         .with_rpc(RpcServerArgs::default().with_http())
         .with_datadir_args(DatadirArgs {
             datadir,
