@@ -4,6 +4,8 @@ mod evm;
 mod impersonation;
 mod mining;
 mod pool;
+#[cfg(test)]
+mod test_helpers;
 mod time;
 
 #[cfg(test)]
@@ -49,6 +51,8 @@ use serde_json::Value;
 use std::sync::Arc;
 #[cfg(test)]
 use std::time::Duration;
+#[cfg(test)]
+use test_helpers::with_test_client;
 use time::TimeManager;
 #[cfg(test)]
 use tokio::time::sleep;
@@ -190,775 +194,402 @@ async fn wait_for_block_number(client: &HttpClient, expected: u64) -> Result<()>
 }
 
 #[cfg(test)]
-fn test_node_config() -> NodeConfig<reth_ethereum::chainspec::ChainSpec> {
-    let datadir = MaybePlatformPath::<DataDirPath>::from(tempfile::tempdir().unwrap().keep());
-    NodeConfig::test()
-        .with_chain(DEV.clone())
-        .dev()
-        .with_rpc(RpcServerArgs::default().with_unused_ports().with_http())
-        .with_datadir_args(DatadirArgs {
-            datadir,
-            ..Default::default()
-        })
-}
-
-#[cfg(test)]
 #[tokio::test]
 async fn explicit_impersonation_allows_eth_send_transaction() -> Result<()> {
-    let runtime = Runtime::test();
-    let node_config = test_node_config();
-    let impersonation = ImpersonationState::default();
-    let mining = MiningController::default();
-    let trigger_stream = mining.trigger_stream();
+    with_test_client(|client| async move {
+        let dev_accounts: Vec<Address> = client.request("eth_accounts", rpc_params![]).await?;
+        let funder = *dev_accounts
+            .first()
+            .ok_or_eyre("no dev account available")?;
+        let gas_price: u128 = client
+            .request::<U256, _>("eth_gasPrice", rpc_params![])
+            .await?
+            .to::<u128>()
+            + 1_000_000_000u128;
+        let target = Address::repeat_byte(0x11);
+        let recipient = Address::repeat_byte(0x22);
 
-    let NodeHandle { node, .. } = NodeBuilder::new(node_config)
-        .with_database(Arc::new(MemoryDatabase::new()))
-        .with_launch_context(runtime.clone())
-        .with_types::<EthereumNode>()
-        .with_components(
-            EthereumNode::components()
-                .network(NoopNetworkBuilder::eth())
-                .pool(AnvilPoolBuilder {
-                    state: impersonation.clone(),
-                })
-                .executor(AnvilExecutorBuilder {
-                    state: impersonation.clone(),
-                }),
-        )
-        .with_add_ons(EthereumAddOns::default())
-        .extend_rpc_modules({
-            let impersonation = impersonation.clone();
-            let mining = mining.clone();
-            move |ctx| {
-                ctx.registry
-                    .eth_api()
-                    .signers()
-                    .write()
-                    .push(Box::new(ImpersonatedSigner::new(impersonation.clone())));
-                ctx.modules.merge_configured(
-                    AnvilRpc::new(
-                        impersonation,
-                        mining,
-                        TimeManager::default(),
-                        ctx.pool().clone(),
-                        ctx.provider().clone(),
-                        ctx.registry.eth_api().clone(),
-                    )
-                    .into_rpc(),
-                )?;
-                Ok(())
-            }
-        })
-        .launch_with_debug_capabilities()
-        .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
-        .await?;
+        let funding_tx = TransactionRequest::default()
+            .with_from(funder)
+            .with_to(target)
+            .with_gas_price(gas_price)
+            .with_value(U256::from(1_000_000_000_000_000_000u64));
+        let funding_hash: B256 = client
+            .request("eth_sendTransaction", rpc_params![funding_tx])
+            .await?;
+        wait_for_receipt(&client, funding_hash).await?;
 
-    node.task_executor.spawn_critical_task(
-        "anvil automine control",
-        run_automine_task(node.pool.clone(), mining.clone()),
-    );
-    node.task_executor.spawn_critical_task(
-        "anvil interval mining control",
-        run_interval_mining_task(mining.clone()),
-    );
+        client
+            .request::<(), _>("hardhat_impersonateAccount", rpc_params![target])
+            .await?;
 
-    let client = node
-        .rpc_server_handles
-        .rpc
-        .http_client()
-        .ok_or_eyre("http rpc client not available")?;
+        let impersonated_tx = TransactionRequest::default()
+            .with_from(target)
+            .with_to(recipient)
+            .with_gas_price(gas_price)
+            .with_value(U256::from(1));
+        let impersonated_hash: B256 = client
+            .request("eth_sendTransaction", rpc_params![impersonated_tx])
+            .await?;
+        wait_for_receipt(&client, impersonated_hash).await?;
 
-    let dev_accounts: Vec<Address> = client.request("eth_accounts", rpc_params![]).await?;
-    let funder = *dev_accounts
-        .first()
-        .ok_or_eyre("no dev account available")?;
-    let gas_price: u128 = client
-        .request::<U256, _>("eth_gasPrice", rpc_params![])
-        .await?
-        .to::<u128>()
-        + 1_000_000_000u128;
-    let target = Address::repeat_byte(0x11);
-    let recipient = Address::repeat_byte(0x22);
+        client
+            .request::<(), _>("hardhat_stopImpersonatingAccount", rpc_params![target])
+            .await?;
 
-    let funding_tx = TransactionRequest::default()
-        .with_from(funder)
-        .with_to(target)
-        .with_gas_price(gas_price)
-        .with_value(U256::from(1_000_000_000_000_000_000u64));
-    let funding_hash: B256 = client
-        .request("eth_sendTransaction", rpc_params![funding_tx])
-        .await?;
-    wait_for_receipt(&client, funding_hash).await?;
+        let stopped_tx = TransactionRequest::default()
+            .with_from(target)
+            .with_to(recipient)
+            .with_gas_price(gas_price)
+            .with_value(U256::from(1));
+        let err: ClientError = client
+            .request::<B256, _>("eth_sendTransaction", rpc_params![stopped_tx])
+            .await
+            .expect_err("stopped impersonation should reject eth_sendTransaction");
+        assert!(
+            err.to_string().contains("unknown account"),
+            "unexpected error after stop impersonating: {err}"
+        );
 
-    client
-        .request::<(), _>("hardhat_impersonateAccount", rpc_params![target])
-        .await?;
-
-    let impersonated_tx = TransactionRequest::default()
-        .with_from(target)
-        .with_to(recipient)
-        .with_gas_price(gas_price)
-        .with_value(U256::from(1));
-    let impersonated_hash: B256 = client
-        .request("eth_sendTransaction", rpc_params![impersonated_tx])
-        .await?;
-    wait_for_receipt(&client, impersonated_hash).await?;
-
-    client
-        .request::<(), _>("hardhat_stopImpersonatingAccount", rpc_params![target])
-        .await?;
-
-    let stopped_tx = TransactionRequest::default()
-        .with_from(target)
-        .with_to(recipient)
-        .with_gas_price(gas_price)
-        .with_value(U256::from(1));
-    let err: ClientError = client
-        .request::<B256, _>("eth_sendTransaction", rpc_params![stopped_tx])
-        .await
-        .expect_err("stopped impersonation should reject eth_sendTransaction");
-    assert!(
-        err.to_string().contains("unknown account"),
-        "unexpected error after stop impersonating: {err}"
-    );
-
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(test)]
 #[tokio::test]
 async fn set_automine_controls_transaction_mining() -> Result<()> {
-    let runtime = Runtime::test();
-    let node_config = test_node_config();
-    let impersonation = ImpersonationState::default();
-    let mining = MiningController::default();
-    let trigger_stream = mining.trigger_stream();
+    with_test_client(|client| async move {
+        let dev_accounts: Vec<Address> = client.request("eth_accounts", rpc_params![]).await?;
+        let funder = *dev_accounts
+            .first()
+            .ok_or_eyre("no dev account available")?;
+        let gas_price: u128 = client
+            .request::<U256, _>("eth_gasPrice", rpc_params![])
+            .await?
+            .to::<u128>()
+            + 1_000_000_000u128;
+        let initial_block = block_number(&client).await?;
+        let enabled: bool = client.request("anvil_getAutomine", rpc_params![]).await?;
+        assert!(enabled, "automine should be enabled by default");
+        let interval: Option<u64> = client
+            .request("anvil_getIntervalMining", rpc_params![])
+            .await?;
+        assert_eq!(interval, None, "interval mining should be unset by default");
 
-    let NodeHandle { node, .. } = NodeBuilder::new(node_config)
-        .with_database(Arc::new(MemoryDatabase::new()))
-        .with_launch_context(runtime.clone())
-        .with_types::<EthereumNode>()
-        .with_components(
-            EthereumNode::components()
-                .network(NoopNetworkBuilder::eth())
-                .pool(AnvilPoolBuilder {
-                    state: impersonation.clone(),
-                })
-                .executor(AnvilExecutorBuilder {
-                    state: impersonation.clone(),
-                }),
-        )
-        .with_add_ons(EthereumAddOns::default())
-        .extend_rpc_modules({
-            let impersonation = impersonation.clone();
-            let mining = mining.clone();
-            move |ctx| {
-                ctx.registry
-                    .eth_api()
-                    .signers()
-                    .write()
-                    .push(Box::new(ImpersonatedSigner::new(impersonation.clone())));
-                ctx.modules.merge_configured(
-                    AnvilRpc::new(
-                        impersonation,
-                        mining,
-                        TimeManager::default(),
-                        ctx.pool().clone(),
-                        ctx.provider().clone(),
-                        ctx.registry.eth_api().clone(),
-                    )
-                    .into_rpc(),
-                )?;
-                Ok(())
-            }
-        })
-        .launch_with_debug_capabilities()
-        .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
-        .await?;
+        client
+            .request::<(), _>("evm_setAutomine", rpc_params![false])
+            .await?;
+        let enabled: bool = client.request("anvil_getAutomine", rpc_params![]).await?;
+        assert!(
+            !enabled,
+            "automine should be disabled after evm_setAutomine(false)"
+        );
+        let interval: Option<u64> = client
+            .request("anvil_getIntervalMining", rpc_params![])
+            .await?;
+        assert_eq!(
+            interval, None,
+            "manual mode should not report interval mining"
+        );
 
-    node.task_executor.spawn_critical_task(
-        "anvil automine control",
-        run_automine_task(node.pool.clone(), mining.clone()),
-    );
-    node.task_executor.spawn_critical_task(
-        "anvil interval mining control",
-        run_interval_mining_task(mining.clone()),
-    );
+        let tx = TransactionRequest::default()
+            .with_from(funder)
+            .with_to(Address::repeat_byte(0x33))
+            .with_gas_price(gas_price)
+            .with_value(U256::from(1));
+        let tx_hash: B256 = client
+            .request("eth_sendTransaction", rpc_params![tx])
+            .await?;
 
-    let client = node
-        .rpc_server_handles
-        .rpc
-        .http_client()
-        .ok_or_eyre("http rpc client not available")?;
+        assert_no_receipt(&client, tx_hash, 5).await?;
+        assert_eq!(block_number(&client).await?, initial_block);
 
-    let dev_accounts: Vec<Address> = client.request("eth_accounts", rpc_params![]).await?;
-    let funder = *dev_accounts
-        .first()
-        .ok_or_eyre("no dev account available")?;
-    let gas_price: u128 = client
-        .request::<U256, _>("eth_gasPrice", rpc_params![])
-        .await?
-        .to::<u128>()
-        + 1_000_000_000u128;
-    let initial_block = block_number(&client).await?;
-    let enabled: bool = client.request("anvil_getAutomine", rpc_params![]).await?;
-    assert!(enabled, "automine should be enabled by default");
-    let interval: Option<u64> = client
-        .request("anvil_getIntervalMining", rpc_params![])
-        .await?;
-    assert_eq!(interval, None, "interval mining should be unset by default");
+        client
+            .request::<(), _>("anvil_setAutomine", rpc_params![true])
+            .await?;
+        let enabled: bool = client.request("anvil_getAutomine", rpc_params![]).await?;
+        assert!(
+            enabled,
+            "automine should be enabled after anvil_setAutomine(true)"
+        );
+        let interval: Option<u64> = client
+            .request("anvil_getIntervalMining", rpc_params![])
+            .await?;
+        assert_eq!(interval, None, "automine should clear interval mining");
 
-    client
-        .request::<(), _>("evm_setAutomine", rpc_params![false])
-        .await?;
-    let enabled: bool = client.request("anvil_getAutomine", rpc_params![]).await?;
-    assert!(
-        !enabled,
-        "automine should be disabled after evm_setAutomine(false)"
-    );
-    let interval: Option<u64> = client
-        .request("anvil_getIntervalMining", rpc_params![])
-        .await?;
-    assert_eq!(
-        interval, None,
-        "manual mode should not report interval mining"
-    );
+        wait_for_receipt(&client, tx_hash).await?;
+        assert_eq!(block_number(&client).await?, initial_block + 1);
 
-    let tx = TransactionRequest::default()
-        .with_from(funder)
-        .with_to(Address::repeat_byte(0x33))
-        .with_gas_price(gas_price)
-        .with_value(U256::from(1));
-    let tx_hash: B256 = client
-        .request("eth_sendTransaction", rpc_params![tx])
-        .await?;
-
-    assert_no_receipt(&client, tx_hash, 5).await?;
-    assert_eq!(block_number(&client).await?, initial_block);
-
-    client
-        .request::<(), _>("anvil_setAutomine", rpc_params![true])
-        .await?;
-    let enabled: bool = client.request("anvil_getAutomine", rpc_params![]).await?;
-    assert!(
-        enabled,
-        "automine should be enabled after anvil_setAutomine(true)"
-    );
-    let interval: Option<u64> = client
-        .request("anvil_getIntervalMining", rpc_params![])
-        .await?;
-    assert_eq!(interval, None, "automine should clear interval mining");
-
-    wait_for_receipt(&client, tx_hash).await?;
-    assert_eq!(block_number(&client).await?, initial_block + 1);
-
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(test)]
 #[tokio::test]
 async fn anvil_mine_advances_requested_blocks() -> Result<()> {
-    let runtime = Runtime::test();
-    let node_config = test_node_config();
-    let impersonation = ImpersonationState::default();
-    let mining = MiningController::default();
-    let trigger_stream = mining.trigger_stream();
+    with_test_client(|client| async move {
+        let initial_block = block_number(&client).await?;
 
-    let NodeHandle { node, .. } = NodeBuilder::new(node_config)
-        .with_database(Arc::new(MemoryDatabase::new()))
-        .with_launch_context(runtime.clone())
-        .with_types::<EthereumNode>()
-        .with_components(
-            EthereumNode::components()
-                .network(NoopNetworkBuilder::eth())
-                .pool(AnvilPoolBuilder {
-                    state: impersonation.clone(),
-                })
-                .executor(AnvilExecutorBuilder {
-                    state: impersonation.clone(),
-                }),
-        )
-        .with_add_ons(EthereumAddOns::default())
-        .extend_rpc_modules({
-            let impersonation = impersonation.clone();
-            let mining = mining.clone();
-            move |ctx| {
-                ctx.registry
-                    .eth_api()
-                    .signers()
-                    .write()
-                    .push(Box::new(ImpersonatedSigner::new(impersonation.clone())));
-                ctx.modules.merge_configured(
-                    AnvilRpc::new(
-                        impersonation,
-                        mining,
-                        TimeManager::default(),
-                        ctx.pool().clone(),
-                        ctx.provider().clone(),
-                        ctx.registry.eth_api().clone(),
-                    )
-                    .into_rpc(),
-                )?;
-                Ok(())
-            }
-        })
-        .launch_with_debug_capabilities()
-        .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
-        .await?;
+        client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+        wait_for_block_number(&client, initial_block + 1).await?;
 
-    node.task_executor.spawn_critical_task(
-        "anvil automine control",
-        run_automine_task(node.pool.clone(), mining.clone()),
-    );
-    node.task_executor.spawn_critical_task(
-        "anvil interval mining control",
-        run_interval_mining_task(mining.clone()),
-    );
+        client
+            .request::<(), _>("hardhat_mine", rpc_params![U256::from(2)])
+            .await?;
+        wait_for_block_number(&client, initial_block + 3).await?;
 
-    let client = node
-        .rpc_server_handles
-        .rpc
-        .http_client()
-        .ok_or_eyre("http rpc client not available")?;
-    let initial_block = block_number(&client).await?;
+        let err: ClientError = client
+            .request::<(), _>("anvil_mine", rpc_params![U256::from(1), U256::from(1)])
+            .await
+            .expect_err("non-zero interval should fail until timestamp controls exist");
+        assert!(
+            err.to_string().contains("interval is not supported yet"),
+            "unexpected error: {err:?}",
+        );
 
-    client.request::<(), _>("anvil_mine", rpc_params![]).await?;
-    wait_for_block_number(&client, initial_block + 1).await?;
-
-    client
-        .request::<(), _>("hardhat_mine", rpc_params![U256::from(2)])
-        .await?;
-    wait_for_block_number(&client, initial_block + 3).await?;
-
-    let err: ClientError = client
-        .request::<(), _>("anvil_mine", rpc_params![U256::from(1), U256::from(1)])
-        .await
-        .expect_err("non-zero interval should fail until timestamp controls exist");
-    assert!(
-        err.to_string().contains("interval is not supported yet"),
-        "unexpected error: {err:?}",
-    );
-
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(test)]
 #[tokio::test]
 async fn set_interval_mining_controls_block_production() -> Result<()> {
-    let runtime = Runtime::test();
-    let node_config = test_node_config();
-    let impersonation = ImpersonationState::default();
-    let mining = MiningController::default();
-    let trigger_stream = mining.trigger_stream();
+    with_test_client(|client| async move {
+        let initial_block = block_number(&client).await?;
 
-    let NodeHandle { node, .. } = NodeBuilder::new(node_config)
-        .with_database(Arc::new(MemoryDatabase::new()))
-        .with_launch_context(runtime.clone())
-        .with_types::<EthereumNode>()
-        .with_components(
-            EthereumNode::components()
-                .network(NoopNetworkBuilder::eth())
-                .pool(AnvilPoolBuilder {
-                    state: impersonation.clone(),
-                })
-                .executor(AnvilExecutorBuilder {
-                    state: impersonation.clone(),
-                }),
-        )
-        .with_add_ons(EthereumAddOns::default())
-        .extend_rpc_modules({
-            let impersonation = impersonation.clone();
-            let mining = mining.clone();
-            move |ctx| {
-                ctx.registry
-                    .eth_api()
-                    .signers()
-                    .write()
-                    .push(Box::new(ImpersonatedSigner::new(impersonation.clone())));
-                ctx.modules.merge_configured(
-                    AnvilRpc::new(
-                        impersonation,
-                        mining,
-                        TimeManager::default(),
-                        ctx.pool().clone(),
-                        ctx.provider().clone(),
-                        ctx.registry.eth_api().clone(),
-                    )
-                    .into_rpc(),
-                )?;
-                Ok(())
-            }
-        })
-        .launch_with_debug_capabilities()
-        .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
-        .await?;
+        client
+            .request::<(), _>("evm_setIntervalMining", rpc_params![2u64])
+            .await?;
+        let enabled: bool = client.request("anvil_getAutomine", rpc_params![]).await?;
+        assert!(!enabled, "automine should be false in interval mining mode");
+        let interval: Option<u64> = client
+            .request("anvil_getIntervalMining", rpc_params![])
+            .await?;
+        assert_eq!(
+            interval,
+            Some(2),
+            "interval mining should report the configured value"
+        );
 
-    node.task_executor.spawn_critical_task(
-        "anvil automine control",
-        run_automine_task(node.pool.clone(), mining.clone()),
-    );
-    node.task_executor.spawn_critical_task(
-        "anvil interval mining control",
-        run_interval_mining_task(mining.clone()),
-    );
+        client
+            .request::<(), _>("evm_setAutomine", rpc_params![false])
+            .await?;
+        let interval: Option<u64> = client
+            .request("anvil_getIntervalMining", rpc_params![])
+            .await?;
+        assert_eq!(
+            interval,
+            Some(2),
+            "disabling automine should not clear interval mining"
+        );
 
-    let client = node
-        .rpc_server_handles
-        .rpc
-        .http_client()
-        .ok_or_eyre("http rpc client not available")?;
+        wait_for_block_number(&client, initial_block + 1).await?;
 
-    let initial_block = block_number(&client).await?;
+        let dev_accounts: Vec<Address> = client.request("eth_accounts", rpc_params![]).await?;
+        let funder = *dev_accounts
+            .first()
+            .ok_or_eyre("no dev account available")?;
+        let gas_price: u128 = client
+            .request::<U256, _>("eth_gasPrice", rpc_params![])
+            .await?
+            .to::<u128>()
+            + 1_000_000_000u128;
+        let tx = TransactionRequest::default()
+            .with_from(funder)
+            .with_to(Address::repeat_byte(0x44))
+            .with_gas_price(gas_price)
+            .with_value(U256::from(1));
+        let tx_hash: B256 = client
+            .request("eth_sendTransaction", rpc_params![tx])
+            .await?;
 
-    client
-        .request::<(), _>("evm_setIntervalMining", rpc_params![2u64])
-        .await?;
-    let enabled: bool = client.request("anvil_getAutomine", rpc_params![]).await?;
-    assert!(!enabled, "automine should be false in interval mining mode");
-    let interval: Option<u64> = client
-        .request("anvil_getIntervalMining", rpc_params![])
-        .await?;
-    assert_eq!(
-        interval,
-        Some(2),
-        "interval mining should report the configured value"
-    );
+        wait_for_receipt(&client, tx_hash).await?;
 
-    client
-        .request::<(), _>("evm_setAutomine", rpc_params![false])
-        .await?;
-    let interval: Option<u64> = client
-        .request("anvil_getIntervalMining", rpc_params![])
-        .await?;
-    assert_eq!(
-        interval,
-        Some(2),
-        "disabling automine should not clear interval mining"
-    );
+        client
+            .request::<(), _>("anvil_setIntervalMining", rpc_params![0u64])
+            .await?;
+        let enabled: bool = client.request("anvil_getAutomine", rpc_params![]).await?;
+        assert!(!enabled, "manual mode should not report automine");
+        let interval: Option<u64> = client
+            .request("anvil_getIntervalMining", rpc_params![])
+            .await?;
+        assert_eq!(
+            interval, None,
+            "zero interval should disable interval mining"
+        );
+        let tx = TransactionRequest::default()
+            .with_from(funder)
+            .with_to(Address::repeat_byte(0x55))
+            .with_gas_price(gas_price)
+            .with_value(U256::from(1));
+        let tx_hash: B256 = client
+            .request("eth_sendTransaction", rpc_params![tx])
+            .await?;
+        assert_no_receipt(&client, tx_hash, 10).await?;
+        let block_after_manual = block_number(&client).await?;
+        sleep(Duration::from_millis(1200)).await;
+        assert_eq!(
+            block_number(&client).await?,
+            block_after_manual,
+            "manual mode should not keep producing interval blocks",
+        );
 
-    wait_for_block_number(&client, initial_block + 1).await?;
+        let tx = TransactionRequest::default()
+            .with_from(funder)
+            .with_to(Address::repeat_byte(0x66))
+            .with_gas_price(gas_price)
+            .with_value(U256::from(1));
+        let tx_hash: B256 = client
+            .request("eth_sendTransaction", rpc_params![tx])
+            .await?;
+        assert_no_receipt(&client, tx_hash, 5).await?;
 
-    let dev_accounts: Vec<Address> = client.request("eth_accounts", rpc_params![]).await?;
-    let funder = *dev_accounts
-        .first()
-        .ok_or_eyre("no dev account available")?;
-    let gas_price: u128 = client
-        .request::<U256, _>("eth_gasPrice", rpc_params![])
-        .await?
-        .to::<u128>()
-        + 1_000_000_000u128;
-    let tx = TransactionRequest::default()
-        .with_from(funder)
-        .with_to(Address::repeat_byte(0x44))
-        .with_gas_price(gas_price)
-        .with_value(U256::from(1));
-    let tx_hash: B256 = client
-        .request("eth_sendTransaction", rpc_params![tx])
-        .await?;
+        client
+            .request::<(), _>("anvil_mine", rpc_params![U256::from(1), U256::ZERO])
+            .await?;
+        wait_for_receipt(&client, tx_hash).await?;
 
-    wait_for_receipt(&client, tx_hash).await?;
-
-    client
-        .request::<(), _>("anvil_setIntervalMining", rpc_params![0u64])
-        .await?;
-    let enabled: bool = client.request("anvil_getAutomine", rpc_params![]).await?;
-    assert!(!enabled, "manual mode should not report automine");
-    let interval: Option<u64> = client
-        .request("anvil_getIntervalMining", rpc_params![])
-        .await?;
-    assert_eq!(
-        interval, None,
-        "zero interval should disable interval mining"
-    );
-    let tx = TransactionRequest::default()
-        .with_from(funder)
-        .with_to(Address::repeat_byte(0x55))
-        .with_gas_price(gas_price)
-        .with_value(U256::from(1));
-    let tx_hash: B256 = client
-        .request("eth_sendTransaction", rpc_params![tx])
-        .await?;
-    assert_no_receipt(&client, tx_hash, 10).await?;
-    let block_after_manual = block_number(&client).await?;
-    sleep(Duration::from_millis(1200)).await;
-    assert_eq!(
-        block_number(&client).await?,
-        block_after_manual,
-        "manual mode should not keep producing interval blocks",
-    );
-
-    let tx = TransactionRequest::default()
-        .with_from(funder)
-        .with_to(Address::repeat_byte(0x66))
-        .with_gas_price(gas_price)
-        .with_value(U256::from(1));
-    let tx_hash: B256 = client
-        .request("eth_sendTransaction", rpc_params![tx])
-        .await?;
-    assert_no_receipt(&client, tx_hash, 5).await?;
-
-    client
-        .request::<(), _>("anvil_mine", rpc_params![U256::from(1), U256::ZERO])
-        .await?;
-    wait_for_receipt(&client, tx_hash).await?;
-
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(test)]
 #[tokio::test]
 async fn anvil_mine_detailed_returns_full_blocks() -> Result<()> {
-    let runtime = Runtime::test();
-    let node_config = test_node_config();
-    let impersonation = ImpersonationState::default();
-    let mining = MiningController::default();
-    let trigger_stream = mining.trigger_stream();
+    with_test_client(|client| async move {
+        client
+            .request::<(), _>("evm_setAutomine", rpc_params![false])
+            .await?;
 
-    let NodeHandle { node, .. } = NodeBuilder::new(node_config)
-        .with_database(Arc::new(MemoryDatabase::new()))
-        .with_launch_context(runtime.clone())
-        .with_types::<EthereumNode>()
-        .with_components(
-            EthereumNode::components()
-                .network(NoopNetworkBuilder::eth())
-                .pool(AnvilPoolBuilder {
-                    state: impersonation.clone(),
-                })
-                .executor(AnvilExecutorBuilder {
-                    state: impersonation.clone(),
-                }),
-        )
-        .with_add_ons(EthereumAddOns::default())
-        .extend_rpc_modules({
-            let impersonation = impersonation.clone();
-            let mining = mining.clone();
-            move |ctx| {
-                ctx.registry
-                    .eth_api()
-                    .signers()
-                    .write()
-                    .push(Box::new(ImpersonatedSigner::new(impersonation.clone())));
-                ctx.modules.merge_configured(
-                    AnvilRpc::new(
-                        impersonation,
-                        mining,
-                        TimeManager::default(),
-                        ctx.pool().clone(),
-                        ctx.provider().clone(),
-                        ctx.registry.eth_api().clone(),
-                    )
-                    .into_rpc(),
-                )?;
-                Ok(())
-            }
-        })
-        .launch_with_debug_capabilities()
-        .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
-        .await?;
+        let dev_accounts: Vec<Address> = client.request("eth_accounts", rpc_params![]).await?;
+        let funder = *dev_accounts
+            .first()
+            .ok_or_eyre("no dev account available")?;
+        let gas_price: u128 = client
+            .request::<U256, _>("eth_gasPrice", rpc_params![])
+            .await?
+            .to::<u128>()
+            + 1_000_000_000u128;
+        let tx = TransactionRequest::default()
+            .with_from(funder)
+            .with_to(Address::repeat_byte(0x77))
+            .with_gas_price(gas_price)
+            .with_value(U256::from(1));
+        let tx_hash: B256 = client
+            .request("eth_sendTransaction", rpc_params![tx])
+            .await?;
 
-    node.task_executor.spawn_critical_task(
-        "anvil automine control",
-        run_automine_task(node.pool.clone(), mining.clone()),
-    );
-    node.task_executor.spawn_critical_task(
-        "anvil interval mining control",
-        run_interval_mining_task(mining.clone()),
-    );
+        let initial_block = block_number(&client).await?;
+        let blocks: Vec<Block> = client
+            .request(
+                "anvil_mine_detailed",
+                rpc_params![MineOptions::Options {
+                    timestamp: None,
+                    blocks: Some(2),
+                }],
+            )
+            .await?;
 
-    let client = node
-        .rpc_server_handles
-        .rpc
-        .http_client()
-        .ok_or_eyre("http rpc client not available")?;
+        assert_eq!(
+            blocks.len(),
+            2,
+            "should return the requested number of blocks"
+        );
+        assert_eq!(blocks[0].number(), initial_block + 1);
+        assert_eq!(blocks[1].number(), initial_block + 2);
 
-    client
-        .request::<(), _>("evm_setAutomine", rpc_params![false])
-        .await?;
+        let first_block_txs = blocks[0]
+            .transactions
+            .as_transactions()
+            .ok_or_eyre("anvil_mine_detailed should return full transactions")?;
+        assert_eq!(
+            first_block_txs.len(),
+            1,
+            "pending tx should be mined into first block"
+        );
+        assert_eq!(first_block_txs[0].tx_hash(), tx_hash);
 
-    let dev_accounts: Vec<Address> = client.request("eth_accounts", rpc_params![]).await?;
-    let funder = *dev_accounts
-        .first()
-        .ok_or_eyre("no dev account available")?;
-    let gas_price: u128 = client
-        .request::<U256, _>("eth_gasPrice", rpc_params![])
-        .await?
-        .to::<u128>()
-        + 1_000_000_000u128;
-    let tx = TransactionRequest::default()
-        .with_from(funder)
-        .with_to(Address::repeat_byte(0x77))
-        .with_gas_price(gas_price)
-        .with_value(U256::from(1));
-    let tx_hash: B256 = client
-        .request("eth_sendTransaction", rpc_params![tx])
-        .await?;
+        let second_block_txs = blocks[1]
+            .transactions
+            .as_transactions()
+            .ok_or_eyre("anvil_mine_detailed should return full transactions")?;
+        assert!(
+            second_block_txs.is_empty(),
+            "second block should be empty when there are no pending txs",
+        );
 
-    let initial_block = block_number(&client).await?;
-    let blocks: Vec<Block> = client
-        .request(
-            "anvil_mine_detailed",
-            rpc_params![MineOptions::Options {
-                timestamp: None,
-                blocks: Some(2),
-            }],
-        )
-        .await?;
+        wait_for_receipt(&client, tx_hash).await?;
 
-    assert_eq!(
-        blocks.len(),
-        2,
-        "should return the requested number of blocks"
-    );
-    assert_eq!(blocks[0].number(), initial_block + 1);
-    assert_eq!(blocks[1].number(), initial_block + 2);
+        let err: ClientError = client
+            .request::<Vec<Block>, _>(
+                "evm_mine_detailed",
+                rpc_params![MineOptions::Timestamp(Some(1))],
+            )
+            .await
+            .expect_err("timestamp option should fail until timestamp controls exist");
+        assert!(
+            err.to_string()
+                .contains("anvil_mine_detailed timestamp is not supported yet"),
+            "unexpected error: {err:?}",
+        );
 
-    let first_block_txs = blocks[0]
-        .transactions
-        .as_transactions()
-        .ok_or_eyre("anvil_mine_detailed should return full transactions")?;
-    assert_eq!(
-        first_block_txs.len(),
-        1,
-        "pending tx should be mined into first block"
-    );
-    assert_eq!(first_block_txs[0].tx_hash(), tx_hash);
-
-    let second_block_txs = blocks[1]
-        .transactions
-        .as_transactions()
-        .ok_or_eyre("anvil_mine_detailed should return full transactions")?;
-    assert!(
-        second_block_txs.is_empty(),
-        "second block should be empty when there are no pending txs",
-    );
-
-    wait_for_receipt(&client, tx_hash).await?;
-
-    let err: ClientError = client
-        .request::<Vec<Block>, _>(
-            "evm_mine_detailed",
-            rpc_params![MineOptions::Timestamp(Some(1))],
-        )
-        .await
-        .expect_err("timestamp option should fail until timestamp controls exist");
-    assert!(
-        err.to_string()
-            .contains("anvil_mine_detailed timestamp is not supported yet"),
-        "unexpected error: {err:?}",
-    );
-
-    Ok(())
+        Ok(())
+    })
+    .await
 }
 
 #[cfg(test)]
 #[tokio::test]
 async fn anvil_set_and_remove_block_timestamp_interval() -> Result<()> {
-    let runtime = Runtime::test();
-    let node_config = test_node_config();
-    let impersonation = ImpersonationState::default();
-    let mining = MiningController::default();
-    let trigger_stream = mining.trigger_stream();
+    with_test_client(|client| async move {
+        let removed: bool = client
+            .request("anvil_removeBlockTimestampInterval", rpc_params![])
+            .await?;
+        assert!(!removed, "should return false when no interval is set");
 
-    let NodeHandle { node, .. } = NodeBuilder::new(node_config)
-        .with_database(Arc::new(MemoryDatabase::new()))
-        .with_launch_context(runtime.clone())
-        .with_types::<EthereumNode>()
-        .with_components(
-            EthereumNode::components()
-                .network(NoopNetworkBuilder::eth())
-                .pool(AnvilPoolBuilder {
-                    state: impersonation.clone(),
-                })
-                .executor(AnvilExecutorBuilder {
-                    state: impersonation.clone(),
-                }),
-        )
-        .with_add_ons(EthereumAddOns::default())
-        .extend_rpc_modules({
-            let impersonation = impersonation.clone();
-            let mining = mining.clone();
-            move |ctx| {
-                ctx.registry
-                    .eth_api()
-                    .signers()
-                    .write()
-                    .push(Box::new(ImpersonatedSigner::new(impersonation.clone())));
-                ctx.modules.merge_configured(
-                    AnvilRpc::new(
-                        impersonation,
-                        mining,
-                        TimeManager::default(),
-                        ctx.pool().clone(),
-                        ctx.provider().clone(),
-                        ctx.registry.eth_api().clone(),
-                    )
-                    .into_rpc(),
-                )?;
-                Ok(())
-            }
-        })
-        .launch_with_debug_capabilities()
-        .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
-        .await?;
+        client
+            .request::<(), _>("anvil_setBlockTimestampInterval", rpc_params![10u64])
+            .await?;
 
-    node.task_executor.spawn_critical_task(
-        "anvil automine control",
-        run_automine_task(node.pool.clone(), mining.clone()),
-    );
-    node.task_executor.spawn_critical_task(
-        "anvil interval mining control",
-        run_interval_mining_task(mining.clone()),
-    );
+        let removed: bool = client
+            .request("anvil_removeBlockTimestampInterval", rpc_params![])
+            .await?;
+        assert!(removed, "should return true when an interval was removed");
 
-    let client = node
-        .rpc_server_handles
-        .rpc
-        .http_client()
-        .ok_or_eyre("http rpc client not available")?;
+        let removed: bool = client
+            .request("anvil_removeBlockTimestampInterval", rpc_params![])
+            .await?;
+        assert!(
+            !removed,
+            "should return false after interval was already removed"
+        );
 
-    let removed: bool = client
-        .request("anvil_removeBlockTimestampInterval", rpc_params![])
-        .await?;
-    assert!(!removed, "should return false when no interval is set");
+        client
+            .request::<(), _>("anvil_setBlockTimestampInterval", rpc_params![10u64])
+            .await?;
 
-    client
-        .request::<(), _>("anvil_setBlockTimestampInterval", rpc_params![10u64])
-        .await?;
+        client
+            .request::<(), _>("anvil_setBlockTimestampInterval", rpc_params![20u64])
+            .await?;
 
-    let removed: bool = client
-        .request("anvil_removeBlockTimestampInterval", rpc_params![])
-        .await?;
-    assert!(removed, "should return true when an interval was removed");
+        let removed: bool = client
+            .request("anvil_removeBlockTimestampInterval", rpc_params![])
+            .await?;
+        assert!(removed, "should return true after overwritten interval");
 
-    let removed: bool = client
-        .request("anvil_removeBlockTimestampInterval", rpc_params![])
-        .await?;
-    assert!(
-        !removed,
-        "should return false after interval was already removed"
-    );
+        let removed: bool = client
+            .request("anvil_removeBlockTimestampInterval", rpc_params![])
+            .await?;
+        assert!(
+            !removed,
+            "should return false — second set overwrote, not stacked"
+        );
 
-    // setting twice overwrites rather than stacking
-    client
-        .request::<(), _>("anvil_setBlockTimestampInterval", rpc_params![10u64])
-        .await?;
-
-    client
-        .request::<(), _>("anvil_setBlockTimestampInterval", rpc_params![20u64])
-        .await?;
-
-    let removed: bool = client
-        .request("anvil_removeBlockTimestampInterval", rpc_params![])
-        .await?;
-    assert!(removed, "should return true after overwritten interval");
-
-    let removed: bool = client
-        .request("anvil_removeBlockTimestampInterval", rpc_params![])
-        .await?;
-    assert!(
-        !removed,
-        "should return false — second set overwrote, not stacked"
-    );
-
-    Ok(())
+        Ok(())
+    })
+    .await
 }
