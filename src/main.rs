@@ -13,13 +13,14 @@ mod time;
 
 #[cfg(test)]
 use alloy_network::{TransactionBuilder, TransactionResponse};
+use alloy_primitives::B256;
 #[cfg(test)]
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{Address, Bytes, U256};
 #[cfg(test)]
-use alloy_rpc_types_anvil::MineOptions;
+use alloy_rpc_types_anvil::{Metadata, MineOptions, NodeInfo};
 #[cfg(test)]
 use alloy_rpc_types_eth::{state::StateOverridesBuilder, Block, TransactionRequest};
-use anvil_api::{AnvilApiServer, AnvilRpc};
+use anvil_api::{AnvilApiServer, AnvilContext, AnvilNodeConfig, AnvilRpc};
 use eth_builder::anvil_add_ons;
 use evm::AnvilExecutorBuilder;
 use eyre::Result;
@@ -79,6 +80,10 @@ async fn main() -> Result<()> {
     let mining = MiningController::default();
     let time = TimeManager::default();
     let anvil_state = AnvilState::shared();
+    let anvil_context = AnvilContext::new(
+        anvil_state.clone(),
+        AnvilNodeConfig::new(DEV.clone(), B256::random()),
+    );
     let trigger_stream = mining.trigger_stream();
     let NodeHandle {
         node,
@@ -102,7 +107,7 @@ async fn main() -> Result<()> {
             let impersonation = impersonation.clone();
             let mining = mining.clone();
             let time = time.clone();
-            let anvil_state = Arc::clone(&anvil_state);
+            let anvil_context = anvil_context.clone();
             move |ctx| {
                 ctx.registry
                     .eth_api()
@@ -114,7 +119,7 @@ async fn main() -> Result<()> {
                         impersonation,
                         mining,
                         time,
-                        anvil_state,
+                        anvil_context,
                         ctx.pool().clone(),
                         ctx.provider().clone(),
                         ctx.registry.eth_api().clone(),
@@ -150,6 +155,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     async fn wait_for_receipt(client: &HttpClient, tx_hash: B256) -> Result<Value> {
         for _ in 0..50 {
@@ -768,6 +774,71 @@ mod tests {
                 B256::from_slice(result.as_ref()),
                 value,
                 "eth_call should load the overridden storage value"
+            );
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_node_info_and_metadata_follow_latest_head() -> Result<()> {
+        with_test_client(|client| async move {
+            let expected_block_number = block_number(&client).await?;
+            let expected_gas_price: u128 = client
+                .request::<U256, _>("eth_gasPrice", rpc_params![])
+                .await?
+                .to::<u128>();
+            let latest_block: Value = client
+                .request("eth_getBlockByNumber", rpc_params!["latest", false])
+                .await?;
+            let expected_hash = B256::from_str(
+                latest_block["hash"]
+                    .as_str()
+                    .ok_or_eyre("missing latest hash")?,
+            )?;
+            let expected_timestamp = U256::from_str(
+                latest_block["timestamp"]
+                    .as_str()
+                    .ok_or_eyre("missing latest timestamp")?,
+            )?
+            .to::<u64>();
+
+            let node_info: NodeInfo = client.request("anvil_nodeInfo", rpc_params![]).await?;
+            let metadata: Metadata = client.request("anvil_metadata", rpc_params![]).await?;
+            let hardhat_metadata: Metadata =
+                client.request("hardhat_metadata", rpc_params![]).await?;
+
+            assert_eq!(node_info.current_block_number, expected_block_number);
+            assert_eq!(node_info.current_block_timestamp, expected_timestamp);
+            assert_eq!(node_info.current_block_hash, expected_hash);
+            assert_eq!(node_info.transaction_order, "fees");
+            assert_eq!(node_info.environment.chain_id, metadata.chain_id);
+            assert_eq!(node_info.environment.gas_price, expected_gas_price);
+            assert_eq!(metadata.latest_block_number, expected_block_number);
+            assert_eq!(metadata.latest_block_hash, expected_hash);
+            assert_eq!(
+                metadata.client_version,
+                format!("anvil-reth/v{}", env!("CARGO_PKG_VERSION"))
+            );
+            assert_eq!(
+                metadata.client_semver.as_deref(),
+                Some(env!("CARGO_PKG_VERSION"))
+            );
+            assert!(metadata.snapshots.is_empty());
+            assert_eq!(hardhat_metadata, metadata);
+
+            client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+
+            let mined_number = block_number(&client).await?;
+            let mined_info: NodeInfo = client.request("anvil_nodeInfo", rpc_params![]).await?;
+            let mined_metadata: Metadata = client.request("anvil_metadata", rpc_params![]).await?;
+
+            assert_eq!(mined_info.current_block_number, mined_number);
+            assert_eq!(mined_metadata.latest_block_number, mined_number);
+            assert_eq!(
+                mined_info.current_block_hash,
+                mined_metadata.latest_block_hash
             );
 
             Ok(())

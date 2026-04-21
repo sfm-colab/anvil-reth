@@ -1,5 +1,5 @@
 use crate::{
-    anvil_api::{AnvilApiServer, AnvilRpc},
+    anvil_api::{AnvilApiServer, AnvilContext, AnvilNodeConfig, AnvilRpc},
     eth_builder::anvil_add_ons,
     evm::AnvilExecutorBuilder,
     impersonation::{ImpersonatedSigner, ImpersonationState},
@@ -8,6 +8,7 @@ use crate::{
     state::AnvilState,
     time::TimeManager,
 };
+use alloy_primitives::B256;
 use eyre::{OptionExt, Result};
 use jsonrpsee::http_client::HttpClient;
 use reth_db_mem::MemoryDatabase;
@@ -50,6 +51,10 @@ where
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
     let anvil_state = AnvilState::shared();
+    let anvil_context = AnvilContext::new(
+        anvil_state.clone(),
+        AnvilNodeConfig::new(DEV.clone(), B256::random()),
+    );
     let trigger_stream = mining.trigger_stream();
 
     let NodeHandle { node, .. } = NodeBuilder::new(node_config)
@@ -70,7 +75,7 @@ where
         .extend_rpc_modules({
             let impersonation = impersonation.clone();
             let mining = mining.clone();
-            let anvil_state = Arc::clone(&anvil_state);
+            let anvil_context = anvil_context.clone();
             move |ctx| {
                 ctx.registry
                     .eth_api()
@@ -82,7 +87,7 @@ where
                         impersonation,
                         mining,
                         TimeManager::default(),
-                        anvil_state,
+                        anvil_context,
                         ctx.pool().clone(),
                         ctx.provider().clone(),
                         ctx.registry.eth_api().clone(),
