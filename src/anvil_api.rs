@@ -1,6 +1,7 @@
 use crate::block_source::BlockSource;
 use crate::impersonation::ImpersonationState;
 use crate::mining::MiningController;
+use crate::state::SharedAnvilState;
 use crate::time::TimeManager;
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, B256, U256};
@@ -76,6 +77,9 @@ pub trait AnvilApi {
 
     #[method(name = "removeBlockTimestampInterval")]
     async fn anvil_remove_block_timestamp_interval(&self) -> RpcResult<bool>;
+
+    #[method(name = "setBalance", aliases = ["hardhat_setBalance"])]
+    async fn anvil_set_balance(&self, address: Address, balance: U256) -> RpcResult<()>;
 }
 
 /// Implementation of the `anvil_*` RPC namespace.
@@ -84,6 +88,7 @@ pub struct AnvilRpc<Pool, Provider, Blocks> {
     state: ImpersonationState,
     mining: MiningController,
     time: TimeManager,
+    anvil_state: SharedAnvilState,
     pool: Pool,
     provider: Provider,
     blocks: Blocks,
@@ -94,6 +99,7 @@ impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks> {
         state: ImpersonationState,
         mining: MiningController,
         time: TimeManager,
+        anvil_state: SharedAnvilState,
         pool: Pool,
         provider: Provider,
         blocks: Blocks,
@@ -102,6 +108,7 @@ impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks> {
             state,
             mining,
             time,
+            anvil_state,
             pool,
             provider,
             blocks,
@@ -288,5 +295,10 @@ where
 
     async fn anvil_remove_block_timestamp_interval(&self) -> RpcResult<bool> {
         Ok(self.time.remove_block_timestamp_interval())
+    }
+
+    async fn anvil_set_balance(&self, address: Address, balance: U256) -> RpcResult<()> {
+        self.anvil_state.write().set_balance(address, balance);
+        Ok(())
     }
 }

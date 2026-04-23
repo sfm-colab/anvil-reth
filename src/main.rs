@@ -1,9 +1,12 @@
 mod anvil_api;
 mod block_source;
+mod eth_builder;
 mod evm;
 mod impersonation;
 mod mining;
 mod pool;
+mod state;
+mod state_provider;
 #[cfg(test)]
 mod test_helpers;
 mod time;
@@ -11,12 +14,13 @@ mod time;
 #[cfg(test)]
 use alloy_network::{TransactionBuilder, TransactionResponse};
 #[cfg(test)]
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 #[cfg(test)]
 use alloy_rpc_types_anvil::MineOptions;
 #[cfg(test)]
-use alloy_rpc_types_eth::{Block, TransactionRequest};
+use alloy_rpc_types_eth::{state::StateOverridesBuilder, Block, TransactionRequest};
 use anvil_api::{AnvilApiServer, AnvilRpc};
+use eth_builder::anvil_add_ons;
 use evm::AnvilExecutorBuilder;
 use eyre::Result;
 #[cfg(test)]
@@ -41,7 +45,6 @@ use reth_ethereum::{
             dirs::{DataDirPath, MaybePlatformPath},
             node_config::NodeConfig,
         },
-        node::EthereumAddOns,
         EthereumNode,
     },
     tasks::{RuntimeBuilder, RuntimeConfig},
@@ -56,6 +59,8 @@ use test_helpers::with_test_client;
 use time::TimeManager;
 #[cfg(test)]
 use tokio::time::sleep;
+
+use state::AnvilState;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -73,6 +78,7 @@ async fn main() -> Result<()> {
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
     let time = TimeManager::default();
+    let anvil_state = AnvilState::shared();
     let trigger_stream = mining.trigger_stream();
     let NodeHandle {
         node,
@@ -91,11 +97,12 @@ async fn main() -> Result<()> {
                     state: impersonation.clone(),
                 }),
         )
-        .with_add_ons(EthereumAddOns::default())
+        .with_add_ons(anvil_add_ons(Arc::clone(&anvil_state)))
         .extend_rpc_modules({
             let impersonation = impersonation.clone();
             let mining = mining.clone();
             let time = time.clone();
+            let anvil_state = Arc::clone(&anvil_state);
             move |ctx| {
                 ctx.registry
                     .eth_api()
@@ -107,6 +114,7 @@ async fn main() -> Result<()> {
                         impersonation,
                         mining,
                         time,
+                        anvil_state,
                         ctx.pool().clone(),
                         ctx.provider().clone(),
                         ctx.registry.eth_api().clone(),
@@ -582,6 +590,74 @@ mod tests {
             assert!(
                 !removed,
                 "should return false — second set overwrote, not stacked"
+            );
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_set_balance_reflected_by_eth_get_balance() -> Result<()> {
+        with_test_client(|client| async move {
+            let target = Address::repeat_byte(0xBA);
+            let new_balance = U256::from(42_000_000_000_000_000_000u128); // 42 ETH
+
+            // Verify target starts with zero balance.
+            let before: U256 = client
+                .request("eth_getBalance", rpc_params![target, "latest"])
+                .await?;
+            assert_eq!(before, U256::ZERO, "target should start with zero balance");
+
+            // Set balance via anvil_setBalance.
+            client
+                .request::<(), _>("anvil_setBalance", rpc_params![target, new_balance])
+                .await?;
+
+            // eth_getBalance should reflect the new value immediately.
+            let after: U256 = client
+                .request("eth_getBalance", rpc_params![target, "latest"])
+                .await?;
+            assert_eq!(
+                after, new_balance,
+                "eth_getBalance should return the value set by anvil_setBalance"
+            );
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_set_balance_is_visible_to_stock_eth_call() -> Result<()> {
+        with_test_client(|client| async move {
+            let target = Address::repeat_byte(0xBA);
+            let contract = Address::repeat_byte(0xCC);
+            let new_balance = U256::from(42_000_000_000_000_000_000u128);
+
+            client
+                .request::<(), _>("anvil_setBalance", rpc_params![target, new_balance])
+                .await?;
+
+            // Bytecode: PUSH20 <target> BALANCE PUSH1 0x00 MSTORE PUSH1 0x20 PUSH1 0x00 RETURN
+            let mut bytecode = Vec::with_capacity(30);
+            bytecode.push(0x73);
+            bytecode.extend_from_slice(target.as_slice());
+            bytecode.extend_from_slice(&[0x31, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]);
+
+            let state_override = StateOverridesBuilder::default()
+                .with_code(contract, Bytes::from(bytecode))
+                .build();
+            let call = TransactionRequest::default().with_to(contract);
+
+            let result: Bytes = client
+                .request("eth_call", rpc_params![call, "latest", state_override])
+                .await?;
+
+            assert_eq!(
+                U256::from_be_slice(result.as_ref()),
+                new_balance,
+                "eth_call should see the balance set by anvil_setBalance"
             );
 
             Ok(())
