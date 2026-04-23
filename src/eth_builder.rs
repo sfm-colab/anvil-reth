@@ -13,9 +13,7 @@ use reth_ethereum::{
         node::{EthereumAddOns, EthereumEngineValidatorBuilder},
     },
 };
-use reth_rpc::{
-    eth::core::{EthApiFor, EthRpcConverterFor},
-};
+use reth_rpc::eth::core::{EthApiFor, EthRpcConverterFor};
 use reth_rpc_eth_api::{
     helpers::pending_block::BuildPendingEnv, RpcConvert, RpcTypes, SignableTxRequest,
 };

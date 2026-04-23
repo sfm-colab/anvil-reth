@@ -14,7 +14,7 @@ mod time;
 #[cfg(test)]
 use alloy_network::{TransactionBuilder, TransactionResponse};
 #[cfg(test)]
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 #[cfg(test)]
 use alloy_rpc_types_anvil::MineOptions;
 #[cfg(test)]
@@ -39,10 +39,7 @@ use reth_engine_local::MiningMode as LocalMiningMode;
 use reth_ethereum::{
     chainspec::DEV,
     node::{
-        builder::{
-            components::NoopNetworkBuilder,
-            NodeBuilder, NodeHandle,
-        },
+        builder::{components::NoopNetworkBuilder, NodeBuilder, NodeHandle},
         core::{
             args::{DatadirArgs, RpcServerArgs, StorageArgs},
             dirs::{DataDirPath, MaybePlatformPath},

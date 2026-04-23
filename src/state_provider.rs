@@ -3,7 +3,7 @@ use alloy_primitives::{Address, B256};
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{
     errors::provider::ProviderResult, AccountReader, BlockHashReader, BytecodeReader,
-    HashedPostStateProvider, StateProvider, StateProviderBox, StateProofProvider,
+    HashedPostStateProvider, StateProofProvider, StateProvider, StateProviderBox,
     StateRootProvider, StorageRootProvider,
 };
 use reth_trie::{
@@ -75,7 +75,11 @@ impl StateRootProvider for AnvilStateProvider {
 }
 
 impl StorageRootProvider for AnvilStateProvider {
-    fn storage_root(&self, address: Address, hashed_storage: HashedStorage) -> ProviderResult<B256> {
+    fn storage_root(
+        &self,
+        address: Address,
+        hashed_storage: HashedStorage,
+    ) -> ProviderResult<B256> {
         self.inner.storage_root(address, hashed_storage)
     }
 
@@ -94,7 +98,8 @@ impl StorageRootProvider for AnvilStateProvider {
         slots: &[B256],
         hashed_storage: HashedStorage,
     ) -> ProviderResult<StorageMultiProof> {
-        self.inner.storage_multiproof(address, slots, hashed_storage)
+        self.inner
+            .storage_multiproof(address, slots, hashed_storage)
     }
 }
 

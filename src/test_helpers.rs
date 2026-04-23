@@ -15,10 +15,7 @@ use reth_engine_local::MiningMode as LocalMiningMode;
 use reth_ethereum::{
     chainspec::{ChainSpec, DEV},
     node::{
-        builder::{
-            components::NoopNetworkBuilder,
-            NodeBuilder, NodeHandle,
-        },
+        builder::{components::NoopNetworkBuilder, NodeBuilder, NodeHandle},
         core::{
             args::{DatadirArgs, RpcServerArgs, StorageArgs},
             dirs::{DataDirPath, MaybePlatformPath},
