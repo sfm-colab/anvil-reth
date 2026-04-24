@@ -14,7 +14,7 @@ use jsonrpsee::types::{
     ErrorObjectOwned,
 };
 use reth_ethereum::chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
-use reth_storage_api::{BlockNumReader, HeaderProvider};
+use reth_storage_api::{AccountReader, BlockNumReader, HeaderProvider};
 use reth_transaction_pool::TransactionPool;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::time::sleep;
@@ -87,6 +87,9 @@ pub trait AnvilApi {
 
     #[method(name = "setBalance", aliases = ["hardhat_setBalance"])]
     async fn anvil_set_balance(&self, address: Address, balance: U256) -> RpcResult<()>;
+
+    #[method(name = "addBalance", aliases = ["hardhat_addBalance"])]
+    async fn anvil_add_balance(&self, address: Address, balance: U256) -> RpcResult<()>;
 
     #[method(name = "setNonce", aliases = ["hardhat_setNonce"])]
     async fn anvil_set_nonce(&self, address: Address, nonce: U256) -> RpcResult<()>;
@@ -191,7 +194,7 @@ fn invalid_params(message: impl Into<String>) -> ErrorObjectOwned {
 
 impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks>
 where
-    Provider: BlockNumReader,
+    Provider: AccountReader + BlockNumReader,
     Blocks: BlockSource<Block = Block>,
 {
     async fn wait_for_block_number(&self, expected: u64) -> RpcResult<()> {
@@ -243,13 +246,32 @@ where
 
         Ok(((start + 1)..=end).collect())
     }
+
+    fn account_balance(&self, address: Address) -> RpcResult<U256> {
+        if let Some(balance) = self
+            .context
+            .anvil_state
+            .read()
+            .account(address)
+            .and_then(|account| account.balance())
+        {
+            return Ok(balance);
+        }
+
+        Ok(self
+            .provider
+            .basic_account(&address)
+            .map_err(|error| internal_error(format!("failed to read account: {error}")))?
+            .unwrap_or_default()
+            .balance)
+    }
 }
 
 #[async_trait]
 impl<Pool, Provider, Blocks> AnvilApiServer for AnvilRpc<Pool, Provider, Blocks>
 where
     Pool: TransactionPool + Send + Sync + 'static,
-    Provider: BlockNumReader + HeaderProvider + Send + Sync + 'static,
+    Provider: AccountReader + BlockNumReader + HeaderProvider + Send + Sync + 'static,
     Blocks: BlockSource<Block = Block>,
 {
     async fn anvil_impersonate_account(&self, address: Address) -> RpcResult<()> {
@@ -412,6 +434,15 @@ where
             .anvil_state
             .write()
             .set_balance(address, balance);
+        Ok(())
+    }
+
+    async fn anvil_add_balance(&self, address: Address, balance: U256) -> RpcResult<()> {
+        let current = self.account_balance(address)?;
+        self.context
+            .anvil_state
+            .write()
+            .set_balance(address, current.saturating_add(balance));
         Ok(())
     }
 

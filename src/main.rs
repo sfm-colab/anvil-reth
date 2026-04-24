@@ -672,6 +672,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anvil_add_balance_accumulates_and_is_visible_to_reads() -> Result<()> {
+        with_test_client(|client| async move {
+            let target = Address::repeat_byte(0xAD);
+            let contract = Address::repeat_byte(0xCE);
+            let first = U256::from(7u64);
+            let second = U256::from(9u64);
+            let expected = first + second;
+
+            client
+                .request::<(), _>("anvil_addBalance", rpc_params![target, first])
+                .await?;
+            client
+                .request::<(), _>("anvil_addBalance", rpc_params![target, second])
+                .await?;
+
+            let balance: U256 = client
+                .request("eth_getBalance", rpc_params![target, "latest"])
+                .await?;
+            assert_eq!(
+                balance, expected,
+                "eth_getBalance should reflect the accumulated balance"
+            );
+
+            let mut bytecode = Vec::with_capacity(30);
+            bytecode.push(0x73);
+            bytecode.extend_from_slice(target.as_slice());
+            bytecode.extend_from_slice(&[0x31, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]);
+
+            let state_override = StateOverridesBuilder::default()
+                .with_code(contract, Bytes::from(bytecode))
+                .build();
+            let call = TransactionRequest::default().with_to(contract);
+            let result: Bytes = client
+                .request("eth_call", rpc_params![call, "latest", state_override])
+                .await?;
+
+            assert_eq!(
+                U256::from_be_slice(result.as_ref()),
+                expected,
+                "eth_call should see the accumulated balance"
+            );
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
     async fn anvil_set_nonce_reflected_by_eth_get_transaction_count() -> Result<()> {
         with_test_client(|client| async move {
             let target = Address::repeat_byte(0xAB);
