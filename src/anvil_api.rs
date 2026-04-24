@@ -5,7 +5,7 @@ use crate::state::SharedAnvilState;
 use crate::time::TimeManager;
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, Bytes, B256, U256};
-use alloy_rpc_types_anvil::MineOptions;
+use alloy_rpc_types_anvil::{Metadata, MineOptions, NodeEnvironment, NodeForkConfig, NodeInfo};
 use alloy_rpc_types_eth::Block;
 use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
@@ -13,9 +13,10 @@ use jsonrpsee::types::{
     error::{INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE},
     ErrorObjectOwned,
 };
+use reth_ethereum::chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_storage_api::{BlockNumReader, HeaderProvider};
 use reth_transaction_pool::TransactionPool;
-use std::time::Duration;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::time::sleep;
 
 /// anvil_* RPC namespace.
@@ -72,6 +73,12 @@ pub trait AnvilApi {
     #[method(name = "getGenesisTime")]
     async fn anvil_get_genesis_time(&self) -> RpcResult<u64>;
 
+    #[method(name = "nodeInfo")]
+    async fn anvil_node_info(&self) -> RpcResult<NodeInfo>;
+
+    #[method(name = "metadata", aliases = ["hardhat_metadata"])]
+    async fn anvil_metadata(&self) -> RpcResult<Metadata>;
+
     #[method(name = "setBlockTimestampInterval")]
     async fn anvil_set_block_timestamp_interval(&self, seconds: u64) -> RpcResult<()>;
 
@@ -102,10 +109,54 @@ pub struct AnvilRpc<Pool, Provider, Blocks> {
     state: ImpersonationState,
     mining: MiningController,
     time: TimeManager,
-    anvil_state: SharedAnvilState,
+    context: AnvilContext,
     pool: Pool,
     provider: Provider,
     blocks: Blocks,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnvilContext {
+    anvil_state: SharedAnvilState,
+    node: AnvilNodeConfig,
+}
+
+impl AnvilContext {
+    pub fn new(anvil_state: SharedAnvilState, node: AnvilNodeConfig) -> Self {
+        Self { anvil_state, node }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AnvilNodeConfig {
+    chain_spec: Arc<ChainSpec>,
+    instance_id: B256,
+}
+
+impl AnvilNodeConfig {
+    pub fn new(chain_spec: Arc<ChainSpec>, instance_id: B256) -> Self {
+        Self {
+            chain_spec,
+            instance_id,
+        }
+    }
+
+    fn hardfork_name(&self, timestamp: u64) -> String {
+        let chain_spec = &self.chain_spec;
+
+        if chain_spec.is_osaka_active_at_timestamp(timestamp) {
+            "osaka"
+        } else if chain_spec.is_prague_active_at_timestamp(timestamp) {
+            "prague"
+        } else if chain_spec.is_cancun_active_at_timestamp(timestamp) {
+            "cancun"
+        } else if chain_spec.is_shanghai_active_at_timestamp(timestamp) {
+            "shanghai"
+        } else {
+            "london"
+        }
+        .to_string()
+    }
 }
 
 impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks> {
@@ -113,7 +164,7 @@ impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks> {
         state: ImpersonationState,
         mining: MiningController,
         time: TimeManager,
-        anvil_state: SharedAnvilState,
+        context: AnvilContext,
         pool: Pool,
         provider: Provider,
         blocks: Blocks,
@@ -122,7 +173,7 @@ impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks> {
             state,
             mining,
             time,
-            anvil_state,
+            context,
             pool,
             provider,
             blocks,
@@ -163,6 +214,14 @@ where
         self.provider
             .best_block_number()
             .map_err(|error| internal_error(format!("failed to read latest block number: {error}")))
+    }
+
+    async fn latest_block(&self) -> RpcResult<Block> {
+        let number = self.best_block_number()?;
+        self.blocks
+            .block_by_number(number)
+            .await?
+            .ok_or_else(|| internal_error(format!("missing block header {number}")))
     }
 
     async fn mine_blocks(&self, blocks: u64) -> RpcResult<Vec<u64>> {
@@ -302,6 +361,43 @@ where
         Ok(header.timestamp())
     }
 
+    async fn anvil_node_info(&self) -> RpcResult<NodeInfo> {
+        let latest = self.latest_block().await?;
+        let gas_price = self.blocks.gas_price().await?;
+
+        Ok(NodeInfo {
+            current_block_number: latest.header.number,
+            current_block_timestamp: latest.header.timestamp,
+            current_block_hash: latest.header.hash,
+            hard_fork: self.context.node.hardfork_name(latest.header.timestamp),
+            transaction_order: "fees".to_string(),
+            environment: NodeEnvironment {
+                base_fee: latest.header.base_fee_per_gas.unwrap_or_default() as u128,
+                chain_id: self.context.node.chain_spec.chain().id(),
+                gas_limit: latest.header.gas_limit,
+                gas_price: gas_price.to::<u128>(),
+            },
+            fork_config: NodeForkConfig::default(),
+            network: None,
+        })
+    }
+
+    async fn anvil_metadata(&self) -> RpcResult<Metadata> {
+        let latest = self.latest_block().await?;
+
+        Ok(Metadata {
+            client_version: format!("{}/v{}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+            client_semver: Some(env!("CARGO_PKG_VERSION").to_string()),
+            client_commit_sha: option_env!("VERGEN_GIT_SHA").map(ToString::to_string),
+            chain_id: self.context.node.chain_spec.chain().id(),
+            instance_id: self.context.node.instance_id,
+            latest_block_number: latest.header.number,
+            latest_block_hash: latest.header.hash,
+            forked_network: None,
+            snapshots: BTreeMap::new(),
+        })
+    }
+
     async fn anvil_set_block_timestamp_interval(&self, seconds: u64) -> RpcResult<()> {
         self.time.set_block_timestamp_interval(seconds);
         Ok(())
@@ -312,7 +408,10 @@ where
     }
 
     async fn anvil_set_balance(&self, address: Address, balance: U256) -> RpcResult<()> {
-        self.anvil_state.write().set_balance(address, balance);
+        self.context
+            .anvil_state
+            .write()
+            .set_balance(address, balance);
         Ok(())
     }
 
@@ -321,12 +420,15 @@ where
             return Err(invalid_params("nonce exceeds u64::MAX"));
         }
 
-        self.anvil_state.write().set_nonce(address, nonce.to());
+        self.context
+            .anvil_state
+            .write()
+            .set_nonce(address, nonce.to());
         Ok(())
     }
 
     async fn anvil_set_code(&self, address: Address, code: Bytes) -> RpcResult<()> {
-        self.anvil_state.write().set_code(address, code);
+        self.context.anvil_state.write().set_code(address, code);
         Ok(())
     }
 
@@ -336,9 +438,11 @@ where
         slot: U256,
         value: B256,
     ) -> RpcResult<bool> {
-        self.anvil_state
-            .write()
-            .set_storage_at(address, slot.to_be_bytes().into(), value.into());
+        self.context.anvil_state.write().set_storage_at(
+            address,
+            slot.to_be_bytes().into(),
+            value.into(),
+        );
         Ok(true)
     }
 }
