@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
         });
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
-    let time = TimeManager::default();
+    let time = TimeManager::new(DEV.genesis_timestamp());
     let anvil_state = AnvilState::shared();
     let anvil_context = AnvilContext::new(
         anvil_state.clone(),
@@ -130,6 +130,7 @@ async fn main() -> Result<()> {
             }
         })
         .launch_with_debug_capabilities()
+        .map_debug_payload_attributes(time.payload_timestamp_hook())
         .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
         .await?;
 
@@ -195,7 +196,7 @@ mod tests {
     async fn wait_for_block_number(client: &HttpClient, expected: u64) -> Result<()> {
         let mut last_seen = 0;
 
-        for _ in 0..100 {
+        for _ in 0..200 {
             let current = block_number(client).await?;
             if current >= expected {
                 return Ok(());
@@ -206,6 +207,18 @@ mod tests {
         }
 
         bail!("timed out waiting for block {expected}, last seen {last_seen}");
+    }
+
+    async fn block_timestamp(client: &HttpClient, tag: impl Into<Value>) -> Result<u64> {
+        let block: Value = client
+            .request("eth_getBlockByNumber", rpc_params![tag.into(), false])
+            .await?;
+        Ok(U256::from_str(
+            block["timestamp"]
+                .as_str()
+                .ok_or_eyre("missing block timestamp")?,
+        )?
+        .to::<u64>())
     }
 
     #[tokio::test]
@@ -351,15 +364,19 @@ mod tests {
                 .request::<(), _>("hardhat_mine", rpc_params![U256::from(2)])
                 .await?;
             wait_for_block_number(&client, initial_block + 3).await?;
+            let pre_interval_timestamp = block_timestamp(&client, "latest").await?;
 
-            let err: ClientError = client
-                .request::<(), _>("anvil_mine", rpc_params![U256::from(1), U256::from(1)])
-                .await
-                .expect_err("non-zero interval should fail until timestamp controls exist");
-            assert!(
-                err.to_string().contains("interval is not supported yet"),
-                "unexpected error: {err:?}",
-            );
+            client
+                .request::<(), _>("anvil_mine", rpc_params![U256::from(2), U256::from(10)])
+                .await?;
+            wait_for_block_number(&client, initial_block + 5).await?;
+
+            let first_interval_ts =
+                block_timestamp(&client, format!("0x{:x}", initial_block + 4)).await?;
+            let second_interval_ts =
+                block_timestamp(&client, format!("0x{:x}", initial_block + 5)).await?;
+            assert_eq!(first_interval_ts, pre_interval_timestamp + 10);
+            assert_eq!(second_interval_ts, first_interval_ts + 10);
 
             Ok(())
         })
@@ -534,18 +551,16 @@ mod tests {
 
             wait_for_receipt(&client, tx_hash).await?;
 
-            let err: ClientError = client
-                .request::<Vec<Block>, _>(
+            let latest_timestamp = block_timestamp(&client, "latest").await?;
+            let requested_timestamp = latest_timestamp + 15;
+            let blocks: Vec<Block> = client
+                .request(
                     "evm_mine_detailed",
-                    rpc_params![MineOptions::Timestamp(Some(1))],
+                    rpc_params![MineOptions::Timestamp(Some(requested_timestamp))],
                 )
-                .await
-                .expect_err("timestamp option should fail until timestamp controls exist");
-            assert!(
-                err.to_string()
-                    .contains("anvil_mine_detailed timestamp is not supported yet"),
-                "unexpected error: {err:?}",
-            );
+                .await?;
+            assert_eq!(blocks.len(), 1);
+            assert_eq!(blocks[0].header.timestamp, requested_timestamp);
 
             Ok(())
         })
@@ -596,6 +611,50 @@ mod tests {
             assert!(
                 !removed,
                 "should return false — second set overwrote, not stacked"
+            );
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_time_controls_are_visible_in_mined_blocks() -> Result<()> {
+        with_test_client(|client| async move {
+            let latest_timestamp = block_timestamp(&client, "latest").await?;
+
+            let _increased: i64 = client
+                .request("anvil_increaseTime", rpc_params![U256::from(30u64)])
+                .await?;
+
+            client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+            let after_increase = block_timestamp(&client, "latest").await?;
+            assert!(
+                after_increase >= latest_timestamp + 30,
+                "increaseTime should move the next mined block forward by at least the requested amount",
+            );
+
+            let exact_timestamp = after_increase + 25;
+            client
+                .request::<(), _>("anvil_setNextBlockTimestamp", rpc_params![exact_timestamp])
+                .await?;
+            client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+            let after_exact = block_timestamp(&client, "latest").await?;
+            assert_eq!(after_exact, exact_timestamp);
+
+            let reset_timestamp = exact_timestamp + 40;
+            let offset: u64 = client
+                .request("anvil_setTime", rpc_params![reset_timestamp])
+                .await?;
+            assert!(
+                offset <= 40,
+                "setTime offset should not exceed requested jump"
+            );
+            client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+            let after_reset = block_timestamp(&client, "latest").await?;
+            assert!(
+                after_reset >= reset_timestamp,
+                "setTime should move the time baseline forward without pinning an exact next-block timestamp",
             );
 
             Ok(())

@@ -90,6 +90,18 @@ pub trait AnvilApi {
     #[method(name = "removeBlockTimestampInterval")]
     async fn anvil_remove_block_timestamp_interval(&self) -> RpcResult<bool>;
 
+    #[method(name = "increaseTime", aliases = ["evm_increaseTime"])]
+    async fn anvil_increase_time(&self, seconds: U256) -> RpcResult<i64>;
+
+    #[method(name = "setTime", aliases = ["evm_setTime"])]
+    async fn anvil_set_time(&self, timestamp: u64) -> RpcResult<u64>;
+
+    #[method(
+        name = "setNextBlockTimestamp",
+        aliases = ["evm_setNextBlockTimestamp"]
+    )]
+    async fn anvil_set_next_block_timestamp(&self, seconds: u64) -> RpcResult<()>;
+
     #[method(name = "setBalance", aliases = ["hardhat_setBalance"])]
     async fn anvil_set_balance(&self, address: Address, balance: U256) -> RpcResult<()>;
 
@@ -214,13 +226,21 @@ fn invalid_params(message: impl Into<String>) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(INVALID_PARAMS_CODE, message.into(), None::<()>)
 }
 
+fn normalize_timestamp_input(timestamp: u64) -> u64 {
+    if timestamp > 1_000_000_000_000 {
+        timestamp / 1000
+    } else {
+        timestamp
+    }
+}
+
 impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks>
 where
     Provider: AccountReader + BlockNumReader,
     Blocks: BlockSource<Block = Block> + FullEthApiServer<NetworkTypes = Ethereum>,
 {
     async fn wait_for_block_number(&self, expected: u64) -> RpcResult<()> {
-        for _ in 0..100 {
+        for _ in 0..200 {
             let current = self.provider.best_block_number().map_err(|error| {
                 internal_error(format!("failed to read latest block number: {error}"))
             })?;
@@ -378,11 +398,24 @@ where
     }
 
     async fn anvil_mine(&self, num_blocks: Option<U256>, interval: Option<U256>) -> RpcResult<()> {
-        if interval.is_some_and(|interval| !interval.is_zero()) {
-            return Err(invalid_params("anvil_mine interval is not supported yet"));
+        let blocks = num_blocks.unwrap_or(U256::from(1)).to::<u64>();
+
+        if let Some(interval) = interval.filter(|interval| !interval.is_zero()) {
+            let previous_interval = self.time.interval();
+            self.time.set_block_timestamp_interval(interval.to::<u64>());
+            let result = self.mine_blocks(blocks).await;
+            match previous_interval {
+                Some(previous_interval) => {
+                    self.time.set_block_timestamp_interval(previous_interval)
+                }
+                None => {
+                    self.time.remove_block_timestamp_interval();
+                }
+            }
+            result?;
+            return Ok(());
         }
 
-        let blocks = num_blocks.unwrap_or(U256::from(1)).to::<u64>();
         self.mine_blocks(blocks).await?;
         Ok(())
     }
@@ -393,10 +426,10 @@ where
             MineOptions::Timestamp(timestamp) => (timestamp, 1),
         };
 
-        if timestamp.is_some() {
-            return Err(invalid_params(
-                "anvil_mine_detailed timestamp is not supported yet",
-            ));
+        if let Some(timestamp) = timestamp {
+            self.time
+                .set_next_block_timestamp(timestamp)
+                .map_err(invalid_params)?;
         }
 
         let mined_blocks = self.mine_blocks(blocks).await?;
@@ -494,6 +527,25 @@ where
 
     async fn anvil_remove_block_timestamp_interval(&self) -> RpcResult<bool> {
         Ok(self.time.remove_block_timestamp_interval())
+    }
+
+    async fn anvil_increase_time(&self, seconds: U256) -> RpcResult<i64> {
+        let offset = self.time.increase_time(seconds.to::<u64>());
+        Ok(offset.min(i64::MAX as i128) as i64)
+    }
+
+    async fn anvil_set_time(&self, timestamp: u64) -> RpcResult<u64> {
+        let timestamp = normalize_timestamp_input(timestamp);
+        let now = self.time.current_call_timestamp();
+        self.time.set_time(timestamp);
+        Ok(timestamp.saturating_sub(now))
+    }
+
+    async fn anvil_set_next_block_timestamp(&self, seconds: u64) -> RpcResult<()> {
+        self.time
+            .set_next_block_timestamp(seconds)
+            .map_err(invalid_params)?;
+        Ok(())
     }
 
     async fn anvil_set_balance(&self, address: Address, balance: U256) -> RpcResult<()> {
