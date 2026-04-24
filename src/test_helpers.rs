@@ -50,6 +50,7 @@ where
     let node_config = test_node_config();
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
+    let time = TimeManager::new(DEV.genesis_timestamp());
     let anvil_state = AnvilState::shared();
     let anvil_context = AnvilContext::new(
         anvil_state.clone(),
@@ -75,6 +76,7 @@ where
         .extend_rpc_modules({
             let impersonation = impersonation.clone();
             let mining = mining.clone();
+            let time = time.clone();
             let anvil_context = anvil_context.clone();
             move |ctx| {
                 ctx.registry
@@ -86,7 +88,7 @@ where
                     AnvilRpc::new(
                         impersonation,
                         mining,
-                        TimeManager::default(),
+                        time,
                         anvil_context,
                         ctx.pool().clone(),
                         ctx.provider().clone(),
@@ -98,6 +100,7 @@ where
             }
         })
         .launch_with_debug_capabilities()
+        .map_debug_payload_attributes(time.payload_timestamp_hook())
         .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
         .await?;
 
