@@ -4,9 +4,13 @@ use crate::mining::MiningController;
 use crate::state::SharedAnvilState;
 use crate::time::TimeManager;
 use alloy_consensus::BlockHeader;
+use alloy_network::{Ethereum, TransactionBuilder};
 use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_anvil::{Metadata, MineOptions, NodeEnvironment, NodeForkConfig, NodeInfo};
-use alloy_rpc_types_eth::Block;
+use alloy_rpc_types_eth::{
+    state::{AccountOverride, StateOverridesBuilder},
+    Block, TransactionRequest,
+};
 use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::types::{
@@ -14,6 +18,7 @@ use jsonrpsee::types::{
     ErrorObjectOwned,
 };
 use reth_ethereum::chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
+use reth_rpc_eth_api::{EthApiServer, FullEthApiServer};
 use reth_storage_api::{AccountReader, BlockNumReader, HeaderProvider};
 use reth_transaction_pool::TransactionPool;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
@@ -104,6 +109,23 @@ pub trait AnvilApi {
         slot: U256,
         value: B256,
     ) -> RpcResult<bool>;
+
+    #[method(name = "dealERC20", aliases = ["hardhat_dealERC20", "setERC20Balance"])]
+    async fn anvil_deal_erc20(
+        &self,
+        address: Address,
+        token_address: Address,
+        balance: U256,
+    ) -> RpcResult<()>;
+
+    #[method(name = "setERC20Allowance")]
+    async fn anvil_set_erc20_allowance(
+        &self,
+        owner: Address,
+        spender: Address,
+        token_address: Address,
+        amount: U256,
+    ) -> RpcResult<()>;
 }
 
 /// Implementation of the `anvil_*` RPC namespace.
@@ -195,7 +217,7 @@ fn invalid_params(message: impl Into<String>) -> ErrorObjectOwned {
 impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks>
 where
     Provider: AccountReader + BlockNumReader,
-    Blocks: BlockSource<Block = Block>,
+    Blocks: BlockSource<Block = Block> + FullEthApiServer<NetworkTypes = Ethereum>,
 {
     async fn wait_for_block_number(&self, expected: u64) -> RpcResult<()> {
         for _ in 0..100 {
@@ -221,8 +243,7 @@ where
 
     async fn latest_block(&self) -> RpcResult<Block> {
         let number = self.best_block_number()?;
-        self.blocks
-            .block_by_number(number)
+        BlockSource::block_by_number(&self.blocks, number)
             .await?
             .ok_or_else(|| internal_error(format!("missing block header {number}")))
     }
@@ -265,6 +286,52 @@ where
             .unwrap_or_default()
             .balance)
     }
+
+    async fn find_erc20_storage_slot(
+        &self,
+        token_address: Address,
+        calldata: Bytes,
+        expected_value: U256,
+    ) -> RpcResult<B256> {
+        let tx = TransactionRequest::default()
+            .with_to(token_address)
+            .with_input(calldata.clone());
+
+        let access_list = EthApiServer::create_access_list(&self.blocks, tx.clone(), None, None)
+            .await?
+            .access_list;
+
+        for item in access_list.0 {
+            if item.address != token_address {
+                continue;
+            }
+
+            for slot in item.storage_keys {
+                let state_override = StateOverridesBuilder::default()
+                    .append(
+                        token_address,
+                        AccountOverride::default().with_state_diff(std::iter::once((
+                            slot,
+                            B256::from(expected_value.to_be_bytes()),
+                        ))),
+                    )
+                    .build();
+
+                let Ok(result) =
+                    EthApiServer::call(&self.blocks, tx.clone(), None, Some(state_override), None)
+                        .await
+                else {
+                    continue;
+                };
+
+                if U256::from_be_slice(result.as_ref()) == expected_value {
+                    return Ok(slot);
+                }
+            }
+        }
+
+        Err(internal_error("Unable to find storage slot"))
+    }
 }
 
 #[async_trait]
@@ -272,7 +339,7 @@ impl<Pool, Provider, Blocks> AnvilApiServer for AnvilRpc<Pool, Provider, Blocks>
 where
     Pool: TransactionPool + Send + Sync + 'static,
     Provider: AccountReader + BlockNumReader + HeaderProvider + Send + Sync + 'static,
-    Blocks: BlockSource<Block = Block>,
+    Blocks: BlockSource<Block = Block> + FullEthApiServer<NetworkTypes = Ethereum>,
 {
     async fn anvil_impersonate_account(&self, address: Address) -> RpcResult<()> {
         self.state.impersonate(address);
@@ -385,7 +452,7 @@ where
 
     async fn anvil_node_info(&self) -> RpcResult<NodeInfo> {
         let latest = self.latest_block().await?;
-        let gas_price = self.blocks.gas_price().await?;
+        let gas_price = BlockSource::gas_price(&self.blocks).await?;
 
         Ok(NodeInfo {
             current_block_number: latest.header.number,
@@ -475,5 +542,58 @@ where
             value.into(),
         );
         Ok(true)
+    }
+
+    async fn anvil_deal_erc20(
+        &self,
+        address: Address,
+        token_address: Address,
+        balance: U256,
+    ) -> RpcResult<()> {
+        const BALANCE_OF_SELECTOR: [u8; 4] = [0x70, 0xa0, 0x82, 0x31];
+
+        let mut calldata = Vec::with_capacity(4 + 32);
+        calldata.extend_from_slice(&BALANCE_OF_SELECTOR);
+        calldata.extend_from_slice(&[0u8; 12]);
+        calldata.extend_from_slice(address.as_slice());
+
+        let slot = self
+            .find_erc20_storage_slot(token_address, Bytes::from(calldata), balance)
+            .await?;
+
+        self.context.anvil_state.write().set_storage_at(
+            token_address,
+            slot,
+            B256::from(balance.to_be_bytes()).into(),
+        );
+        Ok(())
+    }
+
+    async fn anvil_set_erc20_allowance(
+        &self,
+        owner: Address,
+        spender: Address,
+        token_address: Address,
+        amount: U256,
+    ) -> RpcResult<()> {
+        const ALLOWANCE_SELECTOR: [u8; 4] = [0xdd, 0x62, 0xed, 0x3e];
+
+        let mut calldata = Vec::with_capacity(4 + 32 + 32);
+        calldata.extend_from_slice(&ALLOWANCE_SELECTOR);
+        calldata.extend_from_slice(&[0u8; 12]);
+        calldata.extend_from_slice(owner.as_slice());
+        calldata.extend_from_slice(&[0u8; 12]);
+        calldata.extend_from_slice(spender.as_slice());
+
+        let slot = self
+            .find_erc20_storage_slot(token_address, Bytes::from(calldata), amount)
+            .await?;
+
+        self.context.anvil_state.write().set_storage_at(
+            token_address,
+            slot,
+            B256::from(amount.to_be_bytes()).into(),
+        );
+        Ok(())
     }
 }

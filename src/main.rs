@@ -720,6 +720,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn anvil_deal_erc20_is_visible_to_eth_call() -> Result<()> {
+        with_test_client(|client| async move {
+            let token = Address::repeat_byte(0xD0);
+            let target = Address::repeat_byte(0xD1);
+            let amount = U256::from(500u64);
+            let bytecode = Bytes::from_static(&[
+                0x60, 0x00, 0x54, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3,
+            ]);
+
+            client
+                .request::<(), _>("anvil_setCode", rpc_params![token, bytecode])
+                .await?;
+            client
+                .request::<(), _>("anvil_dealERC20", rpc_params![target, token, amount])
+                .await?;
+
+            let mut calldata = Vec::with_capacity(4 + 32);
+            calldata.extend_from_slice(&[0x70, 0xa0, 0x82, 0x31]);
+            calldata.extend_from_slice(&[0u8; 12]);
+            calldata.extend_from_slice(target.as_slice());
+
+            let call = TransactionRequest::default()
+                .with_to(token)
+                .with_input(Bytes::from(calldata));
+            let result: Bytes = client
+                .request("eth_call", rpc_params![call, "latest"])
+                .await?;
+
+            assert_eq!(
+                U256::from_be_slice(result.as_ref()),
+                amount,
+                "eth_call should see the ERC20 balance override"
+            );
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_set_erc20_allowance_is_visible_to_eth_call() -> Result<()> {
+        with_test_client(|client| async move {
+            let token = Address::repeat_byte(0xD2);
+            let owner = Address::repeat_byte(0xD3);
+            let spender = Address::repeat_byte(0xD4);
+            let amount = U256::from(777u64);
+            let bytecode = Bytes::from_static(&[
+                0x60, 0x00, 0x54, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3,
+            ]);
+
+            client
+                .request::<(), _>("anvil_setCode", rpc_params![token, bytecode])
+                .await?;
+            client
+                .request::<(), _>(
+                    "anvil_setERC20Allowance",
+                    rpc_params![owner, spender, token, amount],
+                )
+                .await?;
+
+            let mut calldata = Vec::with_capacity(4 + 32 + 32);
+            calldata.extend_from_slice(&[0xdd, 0x62, 0xed, 0x3e]);
+            calldata.extend_from_slice(&[0u8; 12]);
+            calldata.extend_from_slice(owner.as_slice());
+            calldata.extend_from_slice(&[0u8; 12]);
+            calldata.extend_from_slice(spender.as_slice());
+
+            let call = TransactionRequest::default()
+                .with_to(token)
+                .with_input(Bytes::from(calldata));
+            let result: Bytes = client
+                .request("eth_call", rpc_params![call, "latest"])
+                .await?;
+
+            assert_eq!(
+                U256::from_be_slice(result.as_ref()),
+                amount,
+                "eth_call should see the ERC20 allowance override"
+            );
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
     async fn anvil_set_nonce_reflected_by_eth_get_transaction_count() -> Result<()> {
         with_test_client(|client| async move {
             let target = Address::repeat_byte(0xAB);
