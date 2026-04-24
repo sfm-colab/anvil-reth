@@ -1,5 +1,6 @@
 use crate::{
-    anvil_api::{AnvilApiServer, AnvilContext, AnvilNodeConfig, AnvilRpc},
+    anvil_api::{AnvilApiServer, AnvilContext, AnvilNodeConfig, AnvilRpc, EvmApiServer},
+    block_env::BlockEnvOverrides,
     eth_builder::anvil_add_ons,
     evm::AnvilExecutorBuilder,
     impersonation::{ImpersonatedSigner, ImpersonationState},
@@ -16,7 +17,10 @@ use reth_engine_local::MiningMode as LocalMiningMode;
 use reth_ethereum::{
     chainspec::{ChainSpec, DEV},
     node::{
-        builder::{components::NoopNetworkBuilder, NodeBuilder, NodeHandle},
+        builder::{
+            components::{NoopConsensusBuilder, NoopNetworkBuilder},
+            NodeBuilder, NodeHandle,
+        },
         core::{
             args::{DatadirArgs, RpcServerArgs, StorageArgs},
             dirs::{DataDirPath, MaybePlatformPath},
@@ -51,9 +55,11 @@ where
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
     let time = TimeManager::new(DEV.genesis_timestamp());
+    let block_env = BlockEnvOverrides::default();
     let anvil_state = AnvilState::shared();
     let anvil_context = AnvilContext::new(
         anvil_state.clone(),
+        block_env.clone(),
         AnvilNodeConfig::new(DEV.clone(), B256::random()),
     );
     let trigger_stream = mining.trigger_stream();
@@ -70,7 +76,9 @@ where
                 })
                 .executor(AnvilExecutorBuilder {
                     state: impersonation.clone(),
-                }),
+                    block_env: block_env.clone(),
+                })
+                .consensus(NoopConsensusBuilder),
         )
         .with_add_ons(anvil_add_ons(Arc::clone(&anvil_state)))
         .extend_rpc_modules({
@@ -84,23 +92,23 @@ where
                     .signers()
                     .write()
                     .push(Box::new(ImpersonatedSigner::new(impersonation.clone())));
-                ctx.modules.merge_configured(
-                    AnvilRpc::new(
-                        impersonation,
-                        mining,
-                        time,
-                        anvil_context,
-                        ctx.pool().clone(),
-                        ctx.provider().clone(),
-                        ctx.registry.eth_api().clone(),
-                    )
-                    .into_rpc(),
-                )?;
+                let rpc = AnvilRpc::new(
+                    impersonation,
+                    mining,
+                    time,
+                    anvil_context,
+                    ctx.pool().clone(),
+                    ctx.provider().clone(),
+                    ctx.registry.eth_api().clone(),
+                );
+                ctx.modules
+                    .merge_configured(AnvilApiServer::into_rpc(rpc.clone()))?;
+                ctx.modules.merge_configured(EvmApiServer::into_rpc(rpc))?;
                 Ok(())
             }
         })
         .launch_with_debug_capabilities()
-        .map_debug_payload_attributes(time.payload_timestamp_hook())
+        .map_debug_payload_attributes(time.payload_attributes_hook(block_env))
         .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
         .await?;
 

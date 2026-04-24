@@ -1,3 +1,4 @@
+use crate::block_env::BlockEnvOverrides;
 use crate::block_source::BlockSource;
 use crate::impersonation::ImpersonationState;
 use crate::mining::MiningController;
@@ -145,6 +146,24 @@ pub trait AnvilApi {
         token_address: Address,
         amount: U256,
     ) -> RpcResult<()>;
+
+    #[method(name = "setBlockGasLimit")]
+    async fn anvil_set_block_gas_limit(&self, gas_limit: U256) -> RpcResult<bool>;
+
+    #[method(name = "setCoinbase")]
+    async fn anvil_set_coinbase(&self, address: Address) -> RpcResult<()>;
+
+    #[method(name = "setNextBlockBaseFeePerGas")]
+    async fn anvil_set_next_block_base_fee_per_gas(&self, base_fee: U256) -> RpcResult<()>;
+}
+
+/// `evm_*` RPC namespace.
+///
+/// Hosts methods that Foundry/Anvil expose under the `evm_` prefix rather than `anvil_`.
+#[rpc(server, namespace = "evm")]
+pub trait EvmApi {
+    #[method(name = "setBlockGasLimit")]
+    async fn evm_set_block_gas_limit(&self, gas_limit: U256) -> RpcResult<bool>;
 }
 
 /// Implementation of the `anvil_*` RPC namespace.
@@ -162,12 +181,21 @@ pub struct AnvilRpc<Pool, Provider, Blocks> {
 #[derive(Debug, Clone)]
 pub struct AnvilContext {
     anvil_state: SharedAnvilState,
+    block_env: BlockEnvOverrides,
     node: AnvilNodeConfig,
 }
 
 impl AnvilContext {
-    pub fn new(anvil_state: SharedAnvilState, node: AnvilNodeConfig) -> Self {
-        Self { anvil_state, node }
+    pub fn new(
+        anvil_state: SharedAnvilState,
+        block_env: BlockEnvOverrides,
+        node: AnvilNodeConfig,
+    ) -> Self {
+        Self {
+            anvil_state,
+            block_env,
+            node,
+        }
     }
 }
 
@@ -222,6 +250,14 @@ impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks> {
             provider,
             blocks,
         }
+    }
+
+    fn set_block_gas_limit(&self, gas_limit: U256) -> RpcResult<bool> {
+        if gas_limit > U256::from(u64::MAX) {
+            return Err(invalid_params("gas_limit exceeds u64::MAX"));
+        }
+        self.context.block_env.set_gas_limit(gas_limit.to::<u64>());
+        Ok(true)
     }
 }
 
@@ -717,5 +753,36 @@ where
             B256::from(amount.to_be_bytes()).into(),
         );
         Ok(())
+    }
+
+    async fn anvil_set_block_gas_limit(&self, gas_limit: U256) -> RpcResult<bool> {
+        self.set_block_gas_limit(gas_limit)
+    }
+
+    async fn anvil_set_coinbase(&self, address: Address) -> RpcResult<()> {
+        self.context.block_env.set_coinbase(address);
+        Ok(())
+    }
+
+    async fn anvil_set_next_block_base_fee_per_gas(&self, base_fee: U256) -> RpcResult<()> {
+        if base_fee > U256::from(u64::MAX) {
+            return Err(invalid_params("base_fee exceeds u64::MAX"));
+        }
+        self.context
+            .block_env
+            .set_next_base_fee(base_fee.to::<u64>());
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl<Pool, Provider, Blocks> EvmApiServer for AnvilRpc<Pool, Provider, Blocks>
+where
+    Pool: TransactionPool + Send + Sync + 'static,
+    Provider: AccountReader + BlockNumReader + HeaderProvider + Send + Sync + 'static,
+    Blocks: BlockSource<Block = Block> + FullEthApiServer<NetworkTypes = Ethereum>,
+{
+    async fn evm_set_block_gas_limit(&self, gas_limit: U256) -> RpcResult<bool> {
+        self.set_block_gas_limit(gas_limit)
     }
 }
