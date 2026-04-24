@@ -4,7 +4,7 @@ use crate::mining::MiningController;
 use crate::state::SharedAnvilState;
 use crate::time::TimeManager;
 use alloy_consensus::BlockHeader;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_anvil::MineOptions;
 use alloy_rpc_types_eth::Block;
 use jsonrpsee::core::{async_trait, RpcResult};
@@ -80,6 +80,20 @@ pub trait AnvilApi {
 
     #[method(name = "setBalance", aliases = ["hardhat_setBalance"])]
     async fn anvil_set_balance(&self, address: Address, balance: U256) -> RpcResult<()>;
+
+    #[method(name = "setNonce", aliases = ["hardhat_setNonce"])]
+    async fn anvil_set_nonce(&self, address: Address, nonce: U256) -> RpcResult<()>;
+
+    #[method(name = "setCode", aliases = ["hardhat_setCode"])]
+    async fn anvil_set_code(&self, address: Address, code: Bytes) -> RpcResult<()>;
+
+    #[method(name = "setStorageAt", aliases = ["hardhat_setStorageAt"])]
+    async fn anvil_set_storage_at(
+        &self,
+        address: Address,
+        slot: U256,
+        value: B256,
+    ) -> RpcResult<bool>;
 }
 
 /// Implementation of the `anvil_*` RPC namespace.
@@ -300,5 +314,31 @@ where
     async fn anvil_set_balance(&self, address: Address, balance: U256) -> RpcResult<()> {
         self.anvil_state.write().set_balance(address, balance);
         Ok(())
+    }
+
+    async fn anvil_set_nonce(&self, address: Address, nonce: U256) -> RpcResult<()> {
+        if nonce > U256::from(u64::MAX) {
+            return Err(invalid_params("nonce exceeds u64::MAX"));
+        }
+
+        self.anvil_state.write().set_nonce(address, nonce.to());
+        Ok(())
+    }
+
+    async fn anvil_set_code(&self, address: Address, code: Bytes) -> RpcResult<()> {
+        self.anvil_state.write().set_code(address, code);
+        Ok(())
+    }
+
+    async fn anvil_set_storage_at(
+        &self,
+        address: Address,
+        slot: U256,
+        value: B256,
+    ) -> RpcResult<bool> {
+        self.anvil_state
+            .write()
+            .set_storage_at(address, slot.to_be_bytes().into(), value.into());
+        Ok(true)
     }
 }

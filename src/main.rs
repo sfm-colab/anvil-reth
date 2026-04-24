@@ -664,4 +664,114 @@ mod tests {
         })
         .await
     }
+
+    #[tokio::test]
+    async fn anvil_set_nonce_reflected_by_eth_get_transaction_count() -> Result<()> {
+        with_test_client(|client| async move {
+            let target = Address::repeat_byte(0xAB);
+            let new_nonce = U256::from(7u64);
+
+            let before: U256 = client
+                .request("eth_getTransactionCount", rpc_params![target, "latest"])
+                .await?;
+            assert_eq!(before, U256::ZERO, "target should start with zero nonce");
+
+            client
+                .request::<(), _>("anvil_setNonce", rpc_params![target, new_nonce])
+                .await?;
+
+            let after: U256 = client
+                .request("eth_getTransactionCount", rpc_params![target, "latest"])
+                .await?;
+            assert_eq!(
+                after, new_nonce,
+                "eth_getTransactionCount should see the override"
+            );
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_set_code_is_visible_to_eth_get_code_and_eth_call() -> Result<()> {
+        with_test_client(|client| async move {
+            let contract = Address::repeat_byte(0xCD);
+            let bytecode =
+                Bytes::from_static(&[0x60, 0x2a, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]);
+
+            let before: Bytes = client
+                .request("eth_getCode", rpc_params![contract, "latest"])
+                .await?;
+            assert!(before.is_empty(), "target should start without code");
+
+            client
+                .request::<(), _>("anvil_setCode", rpc_params![contract, bytecode.clone()])
+                .await?;
+
+            let after: Bytes = client
+                .request("eth_getCode", rpc_params![contract, "latest"])
+                .await?;
+            assert_eq!(
+                after, bytecode,
+                "eth_getCode should see the overridden code"
+            );
+
+            let call = TransactionRequest::default().with_to(contract);
+            let result: Bytes = client
+                .request("eth_call", rpc_params![call, "latest"])
+                .await?;
+
+            assert_eq!(
+                U256::from_be_slice(result.as_ref()),
+                U256::from(42u64),
+                "eth_call should execute the overridden code"
+            );
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_set_storage_at_is_visible_to_eth_get_storage_at_and_eth_call() -> Result<()> {
+        with_test_client(|client| async move {
+            let contract = Address::repeat_byte(0xCE);
+            let slot = U256::ZERO;
+            let value = B256::from(U256::from(0xBEEFu64));
+            let bytecode = Bytes::from_static(&[
+                0x60, 0x00, 0x54, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3,
+            ]);
+
+            client
+                .request::<(), _>("anvil_setCode", rpc_params![contract, bytecode])
+                .await?;
+            let updated: bool = client
+                .request("anvil_setStorageAt", rpc_params![contract, slot, value])
+                .await?;
+            assert!(updated, "anvil_setStorageAt should return true");
+
+            let storage: B256 = client
+                .request("eth_getStorageAt", rpc_params![contract, slot, "latest"])
+                .await?;
+            assert_eq!(
+                storage, value,
+                "eth_getStorageAt should see the overridden storage"
+            );
+
+            let call = TransactionRequest::default().with_to(contract);
+            let result: Bytes = client
+                .request("eth_call", rpc_params![call, "latest"])
+                .await?;
+
+            assert_eq!(
+                B256::from_slice(result.as_ref()),
+                value,
+                "eth_call should load the overridden storage value"
+            );
+
+            Ok(())
+        })
+        .await
+    }
 }

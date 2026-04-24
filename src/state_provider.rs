@@ -1,5 +1,5 @@
 use crate::state::SharedAnvilState;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, StorageKey, StorageValue, B256};
 use reth_primitives_traits::{Account, Bytecode};
 use reth_storage_api::{
     errors::provider::ProviderResult, AccountReader, BlockHashReader, BytecodeReader,
@@ -40,12 +40,20 @@ impl AsRef<dyn StateProvider + Send + 'static> for AnvilStateProvider {
 
 impl AccountReader for AnvilStateProvider {
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
-        let Some(balance) = self.state.read().balance_override(*address) else {
+        let Some(account_override) = self.state.read().account(*address) else {
             return self.inner.basic_account(address);
         };
 
         let mut account = self.inner.basic_account(address)?.unwrap_or_default();
-        account.balance = balance;
+        if let Some(balance) = account_override.balance() {
+            account.balance = balance;
+        }
+        if let Some(nonce) = account_override.nonce() {
+            account.nonce = nonce;
+        }
+        if let Some(code_hash) = account_override.code_hash() {
+            account.bytecode_hash = Some(code_hash);
+        }
         Ok(Some(account))
     }
 }
@@ -162,14 +170,22 @@ impl StateProvider for AnvilStateProvider {
     fn storage(
         &self,
         account: Address,
-        storage_key: alloy_primitives::StorageKey,
-    ) -> ProviderResult<Option<alloy_primitives::StorageValue>> {
+        storage_key: StorageKey,
+    ) -> ProviderResult<Option<StorageValue>> {
+        if let Some(value) = self.state.read().storage(account, storage_key) {
+            return Ok(Some(value));
+        }
+
         self.inner.storage(account, storage_key)
     }
 }
 
 impl BytecodeReader for AnvilStateProvider {
     fn bytecode_by_hash(&self, code_hash: &B256) -> ProviderResult<Option<Bytecode>> {
+        if let Some(bytecode) = self.state.read().bytecode_by_hash(code_hash) {
+            return Ok(Some(bytecode));
+        }
+
         self.inner.bytecode_by_hash(code_hash)
     }
 }
