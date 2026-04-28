@@ -50,6 +50,7 @@ allow = [
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
+    "MPL-2.0",
     "Unicode-3.0",
     "Unlicense",
     "Zlib",
@@ -74,4 +75,5 @@ unknown-registry = "warn"
 unknown-git = "deny"
 allow-git = [
     "https://github.com/sfm-colab/reth",
+    "https://github.com/sigp/discv5",
 ]
