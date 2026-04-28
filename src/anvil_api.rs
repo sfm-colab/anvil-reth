@@ -2,6 +2,7 @@ use crate::block_source::BlockSource;
 use crate::impersonation::ImpersonationState;
 use crate::mining::MiningController;
 use crate::state::SharedAnvilState;
+use crate::state_dump::SerializableState;
 use crate::time::TimeManager;
 use alloy_consensus::BlockHeader;
 use alloy_network::{Ethereum, TransactionBuilder};
@@ -19,7 +20,7 @@ use jsonrpsee::types::{
 };
 use reth_ethereum::chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_rpc_eth_api::{EthApiServer, FullEthApiServer};
-use reth_storage_api::{AccountReader, BlockNumReader, HeaderProvider};
+use reth_storage_api::{AccountReader, BlockNumReader, HeaderProvider, StateDumpProvider};
 use reth_transaction_pool::TransactionPool;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use tokio::time::sleep;
@@ -121,6 +122,12 @@ pub trait AnvilApi {
         slot: U256,
         value: B256,
     ) -> RpcResult<bool>;
+
+    #[method(name = "dumpState", aliases = ["hardhat_dumpState"])]
+    async fn anvil_dump_state(&self, preserve_historical_states: Option<bool>) -> RpcResult<Bytes>;
+
+    #[method(name = "loadState", aliases = ["hardhat_loadState"])]
+    async fn anvil_load_state(&self, state: Bytes) -> RpcResult<bool>;
 
     #[method(name = "dealERC20", aliases = ["hardhat_dealERC20", "setERC20Balance"])]
     async fn anvil_deal_erc20(
@@ -236,7 +243,7 @@ fn normalize_timestamp_input(timestamp: u64) -> u64 {
 
 impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks>
 where
-    Provider: AccountReader + BlockNumReader,
+    Provider: AccountReader + BlockNumReader + StateDumpProvider,
     Blocks: BlockSource<Block = Block> + FullEthApiServer<NetworkTypes = Ethereum>,
 {
     async fn wait_for_block_number(&self, expected: u64) -> RpcResult<()> {
@@ -307,6 +314,60 @@ where
             .balance)
     }
 
+    fn account_nonce(&self, address: Address) -> RpcResult<u64> {
+        let base_nonce = self
+            .provider
+            .basic_account(&address)
+            .map_err(|error| internal_error(format!("failed to read account: {error}")))?
+            .unwrap_or_default()
+            .nonce;
+
+        Ok(self
+            .context
+            .anvil_state
+            .read()
+            .account(address)
+            .and_then(|account| account.nonce())
+            .unwrap_or(base_nonce))
+    }
+
+    fn dump_state(&self, preserve_historical_states: Option<bool>) -> RpcResult<Bytes> {
+        if preserve_historical_states.unwrap_or(false) {
+            return Err(invalid_params(
+                "preserving historical states is not supported yet",
+            ));
+        }
+
+        let dump = self
+            .provider
+            .dump_state_collect()
+            .map_err(|error| internal_error(format!("failed to dump state: {error}")))?;
+        let mut state = SerializableState::from_dump(dump, Some(self.best_block_number()?));
+        state.merge_anvil_state(&self.context.anvil_state.read());
+        state
+            .encode_gzipped()
+            .map_err(|error| internal_error(format!("failed to encode state dump: {error}")))
+    }
+
+    fn load_state(&self, buf: Bytes) -> RpcResult<bool> {
+        let state = SerializableState::decode(&buf)
+            .map_err(|error| invalid_params(format!("failed to decode state dump: {error}")))?;
+
+        for (address, account) in state.accounts {
+            let nonce = self.account_nonce(address)?.max(account.nonce);
+            let mut anvil_state = self.context.anvil_state.write();
+            anvil_state.set_balance(address, account.balance);
+            anvil_state.set_nonce(address, nonce);
+            anvil_state.set_code(address, account.code);
+
+            for (slot, value) in account.storage {
+                anvil_state.set_storage_at(address, slot, value.into());
+            }
+        }
+
+        Ok(true)
+    }
+
     async fn find_erc20_storage_slot(
         &self,
         token_address: Address,
@@ -358,7 +419,8 @@ where
 impl<Pool, Provider, Blocks> AnvilApiServer for AnvilRpc<Pool, Provider, Blocks>
 where
     Pool: TransactionPool + Send + Sync + 'static,
-    Provider: AccountReader + BlockNumReader + HeaderProvider + Send + Sync + 'static,
+    Provider:
+        AccountReader + BlockNumReader + HeaderProvider + StateDumpProvider + Send + Sync + 'static,
     Blocks: BlockSource<Block = Block> + FullEthApiServer<NetworkTypes = Ethereum>,
 {
     async fn anvil_impersonate_account(&self, address: Address) -> RpcResult<()> {
@@ -594,6 +656,14 @@ where
             value.into(),
         );
         Ok(true)
+    }
+
+    async fn anvil_dump_state(&self, preserve_historical_states: Option<bool>) -> RpcResult<Bytes> {
+        self.dump_state(preserve_historical_states)
+    }
+
+    async fn anvil_load_state(&self, state: Bytes) -> RpcResult<bool> {
+        self.load_state(state)
     }
 
     async fn anvil_deal_erc20(
