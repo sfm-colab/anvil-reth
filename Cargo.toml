@@ -5,17 +5,17 @@ edition = "2021"
 publish = false
 
 [dependencies]
-reth-db-mem = { git = "https://github.com/sfm-colab/reth", branch = "feat-state-provider-interceptor-pr" }
-reth-ethereum = { git = "https://github.com/sfm-colab/reth", branch = "feat-state-provider-interceptor-pr", features = ["node", "node-api"] }
-reth-engine-local = { git = "https://github.com/sfm-colab/reth", branch = "feat-state-provider-interceptor-pr" }
+reth-db-mem = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
+reth-ethereum = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth", features = ["node", "node-api"] }
+reth-engine-local = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
 reth-primitives-traits = "0.3"
-reth-rpc = { git = "https://github.com/sfm-colab/reth", branch = "feat-state-provider-interceptor-pr" }
-reth-rpc-eth-api = { git = "https://github.com/sfm-colab/reth", branch = "feat-state-provider-interceptor-pr" }
-reth-rpc-eth-types = { git = "https://github.com/sfm-colab/reth", branch = "feat-state-provider-interceptor-pr" }
+reth-rpc = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
+reth-rpc-eth-api = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
+reth-rpc-eth-types = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
 reth-rpc-traits = "0.3"
-reth-storage-api = { git = "https://github.com/sfm-colab/reth", branch = "feat-state-provider-interceptor-pr" }
-reth-transaction-pool = { git = "https://github.com/sfm-colab/reth", branch = "feat-state-provider-interceptor-pr" }
-reth-trie = { git = "https://github.com/sfm-colab/reth", branch = "feat-state-provider-interceptor-pr" }
+reth-storage-api = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
+reth-transaction-pool = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
+reth-trie = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth" }
 
 alloy-consensus = "2"
 alloy-dyn-abi = "1.5"
@@ -23,6 +23,7 @@ alloy-eips = "2"
 alloy-network = "2"
 alloy-rpc-types-anvil = "2"
 futures-util = "0.3"
+flate2 = "1"
 jsonrpsee = { version = "0.26", features = ["server", "macros"] }
 alloy-primitives = "1.5"
 alloy-rpc-types-engine = "2"
@@ -33,10 +34,11 @@ revm-database = "13"
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 eyre = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
-reth-ethereum = { git = "https://github.com/sfm-colab/reth", branch = "feat-state-provider-interceptor-pr", features = ["node", "node-api", "test-utils"] }
-serde_json = "1"
+reth-ethereum = { git = "https://github.com/sfm-colab/reth", branch = "anvil-reth", features = ["node", "node-api", "test-utils"] }
 
 [profile.release]
 opt-level = 3

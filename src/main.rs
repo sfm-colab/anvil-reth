@@ -6,6 +6,7 @@ mod impersonation;
 mod mining;
 mod pool;
 mod state;
+mod state_dump;
 mod state_provider;
 #[cfg(test)]
 mod test_helpers;
@@ -968,6 +969,91 @@ mod tests {
                 value,
                 "eth_call should load the overridden storage value"
             );
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_dump_and_load_state_round_trip() -> Result<()> {
+        with_test_client(|client| async move {
+            let account = Address::repeat_byte(0xA1);
+            let contract = Address::repeat_byte(0xC1);
+            let balance = U256::from(123_456u64);
+            let nonce = U256::from(7u64);
+            let slot = U256::ZERO;
+            let storage = B256::from(U256::from(0xBEEFu64));
+            let code =
+                Bytes::from_static(&[0x60, 0x2a, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]);
+
+            client
+                .request::<(), _>("anvil_setBalance", rpc_params![account, balance])
+                .await?;
+            client
+                .request::<(), _>("anvil_setNonce", rpc_params![account, nonce])
+                .await?;
+            client
+                .request::<(), _>("anvil_setCode", rpc_params![contract, code.clone()])
+                .await?;
+            client
+                .request::<bool, _>("anvil_setStorageAt", rpc_params![contract, slot, storage])
+                .await?;
+
+            let dump: Bytes = client.request("anvil_dumpState", rpc_params![]).await?;
+            assert!(
+                !dump.is_empty(),
+                "dumpState should return gzipped state bytes"
+            );
+
+            let replacement_code =
+                Bytes::from_static(&[0x60, 0x07, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]);
+            client
+                .request::<(), _>("anvil_setBalance", rpc_params![account, U256::from(1u64)])
+                .await?;
+            client
+                .request::<(), _>("anvil_setNonce", rpc_params![account, U256::from(1u64)])
+                .await?;
+            client
+                .request::<(), _>("anvil_setCode", rpc_params![contract, replacement_code])
+                .await?;
+            client
+                .request::<bool, _>(
+                    "anvil_setStorageAt",
+                    rpc_params![contract, slot, B256::from(U256::from(1u64))],
+                )
+                .await?;
+
+            let loaded: bool = client.request("anvil_loadState", rpc_params![dump]).await?;
+            assert!(loaded, "loadState should return true");
+
+            let loaded_balance: U256 = client
+                .request("eth_getBalance", rpc_params![account, "latest"])
+                .await?;
+            assert_eq!(loaded_balance, balance);
+
+            let loaded_nonce: U256 = client
+                .request("eth_getTransactionCount", rpc_params![account, "latest"])
+                .await?;
+            assert_eq!(loaded_nonce, nonce);
+
+            let loaded_code: Bytes = client
+                .request("eth_getCode", rpc_params![contract, "latest"])
+                .await?;
+            assert_eq!(loaded_code, code);
+
+            let loaded_storage: B256 = client
+                .request("eth_getStorageAt", rpc_params![contract, slot, "latest"])
+                .await?;
+            assert_eq!(loaded_storage, storage);
+
+            let result: Bytes = client
+                .request(
+                    "eth_call",
+                    rpc_params![TransactionRequest::default().with_to(contract), "latest"],
+                )
+                .await?;
+            assert_eq!(U256::from_be_slice(result.as_ref()), U256::from(42u64));
 
             Ok(())
         })

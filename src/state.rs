@@ -42,6 +42,10 @@ impl AccountOverride {
     pub fn code_hash(&self) -> Option<B256> {
         self.code.as_ref().map(|code| code.hash)
     }
+
+    pub fn storage(&self) -> &HashMap<StorageKey, StorageValue> {
+        &self.storage
+    }
 }
 
 impl AnvilState {
@@ -86,6 +90,14 @@ impl AnvilState {
     /// Returns the local account state for the given address, if any.
     pub(crate) fn account(&self, address: Address) -> Option<AccountOverride> {
         self.accounts.get(&address).cloned()
+    }
+
+    /// Returns all local account state.
+    pub(crate) fn accounts(&self) -> Vec<(Address, AccountOverride)> {
+        self.accounts
+            .iter()
+            .map(|(address, account)| (*address, account.clone()))
+            .collect()
     }
 
     /// Returns locally overridden bytecode for the given code hash, if any.
