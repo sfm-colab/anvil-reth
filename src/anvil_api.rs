@@ -147,7 +147,7 @@ pub trait AnvilApi {
         amount: U256,
     ) -> RpcResult<()>;
 
-    #[method(name = "setBlockGasLimit")]
+    #[method(name = "setBlockGasLimit", aliases = ["evm_setBlockGasLimit"])]
     async fn anvil_set_block_gas_limit(&self, gas_limit: U256) -> RpcResult<bool>;
 
     #[method(name = "setCoinbase")]
@@ -155,15 +155,6 @@ pub trait AnvilApi {
 
     #[method(name = "setNextBlockBaseFeePerGas")]
     async fn anvil_set_next_block_base_fee_per_gas(&self, base_fee: U256) -> RpcResult<()>;
-}
-
-/// `evm_*` RPC namespace.
-///
-/// Hosts methods that Foundry/Anvil expose under the `evm_` prefix rather than `anvil_`.
-#[rpc(server, namespace = "evm")]
-pub trait EvmApi {
-    #[method(name = "setBlockGasLimit")]
-    async fn evm_set_block_gas_limit(&self, gas_limit: U256) -> RpcResult<bool>;
 }
 
 /// Implementation of the `anvil_*` RPC namespace.
@@ -772,17 +763,5 @@ where
             .block_env
             .set_next_base_fee(base_fee.to::<u64>());
         Ok(())
-    }
-}
-
-#[async_trait]
-impl<Pool, Provider, Blocks> EvmApiServer for AnvilRpc<Pool, Provider, Blocks>
-where
-    Pool: TransactionPool + Send + Sync + 'static,
-    Provider: AccountReader + BlockNumReader + HeaderProvider + Send + Sync + 'static,
-    Blocks: BlockSource<Block = Block> + FullEthApiServer<NetworkTypes = Ethereum>,
-{
-    async fn evm_set_block_gas_limit(&self, gas_limit: U256) -> RpcResult<bool> {
-        self.set_block_gas_limit(gas_limit)
     }
 }

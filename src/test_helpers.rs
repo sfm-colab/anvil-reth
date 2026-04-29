@@ -1,5 +1,5 @@
 use crate::{
-    anvil_api::{AnvilApiServer, AnvilContext, AnvilNodeConfig, AnvilRpc, EvmApiServer},
+    anvil_api::{AnvilApiServer, AnvilContext, AnvilNodeConfig, AnvilRpc},
     block_env::BlockEnvOverrides,
     eth_builder::anvil_add_ons,
     evm::AnvilExecutorBuilder,
@@ -102,8 +102,7 @@ where
                     ctx.registry.eth_api().clone(),
                 );
                 ctx.modules
-                    .merge_configured(AnvilApiServer::into_rpc(rpc.clone()))?;
-                ctx.modules.merge_configured(EvmApiServer::into_rpc(rpc))?;
+                    .merge_configured(AnvilApiServer::into_rpc(rpc))?;
                 Ok(())
             }
         })

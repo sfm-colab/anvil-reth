@@ -22,7 +22,7 @@ use alloy_primitives::{Address, Bytes, U256};
 use alloy_rpc_types_anvil::{Metadata, MineOptions, NodeInfo};
 #[cfg(test)]
 use alloy_rpc_types_eth::{state::StateOverridesBuilder, Block, TransactionRequest};
-use anvil_api::{AnvilApiServer, AnvilContext, AnvilNodeConfig, AnvilRpc, EvmApiServer};
+use anvil_api::{AnvilApiServer, AnvilContext, AnvilNodeConfig, AnvilRpc};
 use block_env::BlockEnvOverrides;
 use eth_builder::anvil_add_ons;
 use evm::AnvilExecutorBuilder;
@@ -134,8 +134,7 @@ async fn main() -> Result<()> {
                     ctx.registry.eth_api().clone(),
                 );
                 ctx.modules
-                    .merge_configured(AnvilApiServer::into_rpc(rpc.clone()))?;
-                ctx.modules.merge_configured(EvmApiServer::into_rpc(rpc))?;
+                    .merge_configured(AnvilApiServer::into_rpc(rpc))?;
                 Ok(())
             }
         })
