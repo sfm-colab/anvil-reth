@@ -1,4 +1,5 @@
 mod anvil_api;
+mod block_env;
 mod block_source;
 mod eth_builder;
 mod evm;
@@ -22,6 +23,7 @@ use alloy_rpc_types_anvil::{Metadata, MineOptions, NodeInfo};
 #[cfg(test)]
 use alloy_rpc_types_eth::{state::StateOverridesBuilder, Block, TransactionRequest};
 use anvil_api::{AnvilApiServer, AnvilContext, AnvilNodeConfig, AnvilRpc};
+use block_env::BlockEnvOverrides;
 use eth_builder::anvil_add_ons;
 use evm::AnvilExecutorBuilder;
 use eyre::Result;
@@ -41,7 +43,10 @@ use reth_engine_local::MiningMode as LocalMiningMode;
 use reth_ethereum::{
     chainspec::DEV,
     node::{
-        builder::{components::NoopNetworkBuilder, NodeBuilder, NodeHandle},
+        builder::{
+            components::{NoopConsensusBuilder, NoopNetworkBuilder},
+            NodeBuilder, NodeHandle,
+        },
         core::{
             args::{DatadirArgs, RpcServerArgs, StorageArgs},
             dirs::{DataDirPath, MaybePlatformPath},
@@ -80,9 +85,11 @@ async fn main() -> Result<()> {
     let impersonation = ImpersonationState::default();
     let mining = MiningController::default();
     let time = TimeManager::new(DEV.genesis_timestamp());
+    let block_env = BlockEnvOverrides::default();
     let anvil_state = AnvilState::shared();
     let anvil_context = AnvilContext::new(
         anvil_state.clone(),
+        block_env.clone(),
         AnvilNodeConfig::new(DEV.clone(), B256::random()),
     );
     let trigger_stream = mining.trigger_stream();
@@ -101,7 +108,9 @@ async fn main() -> Result<()> {
                 })
                 .executor(AnvilExecutorBuilder {
                     state: impersonation.clone(),
-                }),
+                    block_env: block_env.clone(),
+                })
+                .consensus(NoopConsensusBuilder),
         )
         .with_add_ons(anvil_add_ons(Arc::clone(&anvil_state)))
         .extend_rpc_modules({
@@ -115,23 +124,22 @@ async fn main() -> Result<()> {
                     .signers()
                     .write()
                     .push(Box::new(ImpersonatedSigner::new(impersonation.clone())));
-                ctx.modules.merge_configured(
-                    AnvilRpc::new(
-                        impersonation,
-                        mining,
-                        time,
-                        anvil_context,
-                        ctx.pool().clone(),
-                        ctx.provider().clone(),
-                        ctx.registry.eth_api().clone(),
-                    )
-                    .into_rpc(),
-                )?;
+                let rpc = AnvilRpc::new(
+                    impersonation,
+                    mining,
+                    time,
+                    anvil_context,
+                    ctx.pool().clone(),
+                    ctx.provider().clone(),
+                    ctx.registry.eth_api().clone(),
+                );
+                ctx.modules
+                    .merge_configured(AnvilApiServer::into_rpc(rpc))?;
                 Ok(())
             }
         })
         .launch_with_debug_capabilities()
-        .map_debug_payload_attributes(time.payload_timestamp_hook())
+        .map_debug_payload_attributes(time.payload_attributes_hook(block_env))
         .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
         .await?;
 
@@ -1118,6 +1126,120 @@ mod tests {
             assert_eq!(
                 mined_info.current_block_hash,
                 mined_metadata.latest_block_hash
+            );
+
+            Ok(())
+        })
+        .await
+    }
+
+    async fn get_block(client: &HttpClient, tag: impl Into<Value>) -> Result<Value> {
+        Ok(client
+            .request("eth_getBlockByNumber", rpc_params![tag.into(), false])
+            .await?)
+    }
+
+    #[tokio::test]
+    async fn set_block_gas_limit_accepts_anvil_and_evm_namespaces() -> Result<()> {
+        with_test_client(|client| async move {
+            for (method, custom_limit) in [
+                ("evm_setBlockGasLimit", U256::from(20_000_000u64)),
+                ("anvil_setBlockGasLimit", U256::from(21_000_000u64)),
+            ] {
+                let ok: bool = client.request(method, rpc_params![custom_limit]).await?;
+                assert!(ok, "{method} should return true");
+
+                // Mine first block and verify gas limit.
+                client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+                let block1 = get_block(&client, "latest").await?;
+                let gas_limit_1 =
+                    U256::from_str(block1["gasLimit"].as_str().ok_or_eyre("missing gasLimit")?)?;
+                assert_eq!(
+                    gas_limit_1, custom_limit,
+                    "{method} should affect the first mined block"
+                );
+
+                // Mine second block — should persist.
+                client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+                let block2 = get_block(&client, "latest").await?;
+                let gas_limit_2 =
+                    U256::from_str(block2["gasLimit"].as_str().ok_or_eyre("missing gasLimit")?)?;
+                assert_eq!(
+                    gas_limit_2, custom_limit,
+                    "{method} gas limit should persist across blocks"
+                );
+            }
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_set_coinbase_persists_across_blocks() -> Result<()> {
+        with_test_client(|client| async move {
+            let coinbase = Address::repeat_byte(0xCB);
+
+            client
+                .request::<(), _>("anvil_setCoinbase", rpc_params![coinbase])
+                .await?;
+
+            // Mine first block and verify coinbase.
+            client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+            let block1 = get_block(&client, "latest").await?;
+            let miner_1 = Address::from_str(block1["miner"].as_str().ok_or_eyre("missing miner")?)?;
+            assert_eq!(
+                miner_1, coinbase,
+                "first mined block should use the overridden coinbase"
+            );
+
+            // Mine second block — should persist.
+            client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+            let block2 = get_block(&client, "latest").await?;
+            let miner_2 = Address::from_str(block2["miner"].as_str().ok_or_eyre("missing miner")?)?;
+            assert_eq!(miner_2, coinbase, "coinbase should persist across blocks");
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_set_next_block_base_fee_per_gas_is_consumed_once() -> Result<()> {
+        with_test_client(|client| async move {
+            let custom_base_fee = U256::from(42_000_000_000u64); // 42 gwei
+
+            client
+                .request::<(), _>(
+                    "anvil_setNextBlockBaseFeePerGas",
+                    rpc_params![custom_base_fee],
+                )
+                .await?;
+
+            // Mine the target block.
+            client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+            let target_block = get_block(&client, "latest").await?;
+            let base_fee = U256::from_str(
+                target_block["baseFeePerGas"]
+                    .as_str()
+                    .ok_or_eyre("missing baseFeePerGas")?,
+            )?;
+            assert_eq!(
+                base_fee, custom_base_fee,
+                "next mined block should use the overridden base fee"
+            );
+
+            // Mine another block — should NOT use the override (consumed).
+            client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+            let after_block = get_block(&client, "latest").await?;
+            let after_base_fee = U256::from_str(
+                after_block["baseFeePerGas"]
+                    .as_str()
+                    .ok_or_eyre("missing baseFeePerGas")?,
+            )?;
+            assert_ne!(
+                after_base_fee, custom_base_fee,
+                "base fee override should be consumed after one block"
             );
 
             Ok(())

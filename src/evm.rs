@@ -1,3 +1,4 @@
+use crate::block_env::BlockEnvOverrides;
 use crate::impersonation::ImpersonationState;
 use alloy_consensus::Header;
 use alloy_eips::Decodable2718;
@@ -13,6 +14,7 @@ use reth_ethereum::{
 };
 use reth_evm::{
     ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
+    NextBlockEnvAttributes,
 };
 use std::{
     error::Error,
@@ -20,22 +22,28 @@ use std::{
 };
 
 /// Wraps an inner EVM config and overrides sender recovery for impersonated
-/// transactions during engine payload execution.
+/// transactions during engine payload execution, plus block-env overrides
+/// for gas limit and base fee.
 #[derive(Debug, Clone)]
 pub struct AnvilEvmConfig<Evm> {
     inner: Evm,
     state: ImpersonationState,
+    block_env: BlockEnvOverrides,
 }
 
 impl<Evm> AnvilEvmConfig<Evm> {
-    pub const fn new(inner: Evm, state: ImpersonationState) -> Self {
-        Self { inner, state }
+    pub fn new(inner: Evm, state: ImpersonationState, block_env: BlockEnvOverrides) -> Self {
+        Self {
+            inner,
+            state,
+            block_env,
+        }
     }
 }
 
 impl<Evm> ConfigureEvm for AnvilEvmConfig<Evm>
 where
-    Evm: ConfigureEvm<Primitives = EthPrimitives>,
+    Evm: ConfigureEvm<Primitives = EthPrimitives, NextBlockEnvCtx = NextBlockEnvAttributes>,
 {
     type Primitives = <Evm as ConfigureEvm>::Primitives;
     type Error = <Evm as ConfigureEvm>::Error;
@@ -60,7 +68,13 @@ where
         parent: &Header,
         attributes: &Self::NextBlockEnvCtx,
     ) -> Result<EvmEnvFor<Self>, Self::Error> {
-        self.inner.next_evm_env(parent, attributes)
+        let mut attributes = attributes.clone();
+        if let Some(gas_limit) = self.block_env.gas_limit() {
+            attributes.gas_limit = gas_limit;
+        }
+        let mut env = self.inner.next_evm_env(parent, &attributes)?;
+        env.set_base_fee_opt(self.block_env.take_next_base_fee());
+        Ok(env)
     }
 
     fn context_for_block<'a>(
@@ -93,7 +107,8 @@ impl Error for TxConvertError {}
 
 impl<Evm> ConfigureEngineEvm<ExecutionData> for AnvilEvmConfig<Evm>
 where
-    Evm: ConfigureEvm<Primitives = EthPrimitives> + ConfigureEngineEvm<ExecutionData>,
+    Evm: ConfigureEvm<Primitives = EthPrimitives, NextBlockEnvCtx = NextBlockEnvAttributes>
+        + ConfigureEngineEvm<ExecutionData>,
 {
     fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<EvmEnvFor<Self>, Self::Error> {
         self.inner.evm_env_for_payload(payload)
@@ -134,14 +149,15 @@ where
 #[derive(Debug, Clone)]
 pub struct AnvilExecutorBuilder {
     pub state: ImpersonationState,
+    pub block_env: BlockEnvOverrides,
 }
 
 impl<Types, Node> ExecutorBuilder<Node> for AnvilExecutorBuilder
 where
     Types: NodeTypes<ChainSpec: EthereumHardforks + Clone + Debug, Primitives = EthPrimitives>,
     Node: FullNodeTypes<Types = Types>,
-    EthEvmConfig<Types::ChainSpec>:
-        ConfigureEvm<Primitives = EthPrimitives> + ConfigureEngineEvm<ExecutionData>,
+    EthEvmConfig<Types::ChainSpec>: ConfigureEvm<Primitives = EthPrimitives, NextBlockEnvCtx = NextBlockEnvAttributes>
+        + ConfigureEngineEvm<ExecutionData>,
 {
     type EVM = AnvilEvmConfig<EthEvmConfig<Types::ChainSpec>>;
 
@@ -149,6 +165,7 @@ where
         Ok(AnvilEvmConfig::new(
             EthEvmConfig::new(ctx.chain_spec()),
             self.state,
+            self.block_env,
         ))
     }
 }

@@ -1,3 +1,4 @@
+use crate::block_env::BlockEnvOverrides;
 use alloy_rpc_types_engine::PayloadAttributes;
 use parking_lot::RwLock;
 use std::{sync::Arc, time::Duration};
@@ -124,11 +125,18 @@ impl TimeManager {
         next_timestamp
     }
 
-    /// Returns the local-miner payload attribute mapper for this time manager.
-    pub fn payload_timestamp_hook(&self) -> impl Fn(PayloadAttributes) -> PayloadAttributes {
+    /// Returns the local-miner payload attribute mapper for this time manager
+    /// and block-env overrides (coinbase via `suggested_fee_recipient`).
+    pub fn payload_attributes_hook(
+        &self,
+        block_env: BlockEnvOverrides,
+    ) -> impl Fn(PayloadAttributes) -> PayloadAttributes {
         let time = self.clone();
         move |mut attributes: PayloadAttributes| {
             attributes.timestamp = time.next_timestamp();
+            if let Some(coinbase) = block_env.coinbase() {
+                attributes.suggested_fee_recipient = coinbase;
+            }
             attributes
         }
     }
