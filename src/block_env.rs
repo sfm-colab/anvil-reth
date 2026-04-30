@@ -2,6 +2,14 @@ use alloy_primitives::Address;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+/// Restorable block-environment override state.
+#[derive(Clone, Debug, Default)]
+pub struct BlockEnvSnapshot {
+    gas_limit: Option<u64>,
+    coinbase: Option<Address>,
+    next_base_fee: Option<u64>,
+}
+
 /// Shared block-environment overrides for block gas limit, coinbase, and next-block base fee.
 ///
 /// `gas_limit` and `coinbase` are persistent — they apply to every subsequent block
@@ -42,5 +50,21 @@ impl BlockEnvOverrides {
     /// Takes the next-block base fee override, consuming it.
     pub fn take_next_base_fee(&self) -> Option<u64> {
         self.next_base_fee.write().take()
+    }
+
+    /// Captures the current block environment overrides.
+    pub fn snapshot(&self) -> BlockEnvSnapshot {
+        BlockEnvSnapshot {
+            gas_limit: *self.gas_limit.read(),
+            coinbase: *self.coinbase.read(),
+            next_base_fee: *self.next_base_fee.read(),
+        }
+    }
+
+    /// Restores block environment overrides from a snapshot.
+    pub fn restore(&self, snapshot: BlockEnvSnapshot) {
+        *self.gas_limit.write() = snapshot.gas_limit;
+        *self.coinbase.write() = snapshot.coinbase;
+        *self.next_base_fee.write() = snapshot.next_base_fee;
     }
 }

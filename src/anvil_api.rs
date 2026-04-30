@@ -2,6 +2,7 @@ use crate::block_env::BlockEnvOverrides;
 use crate::block_source::BlockSource;
 use crate::impersonation::ImpersonationState;
 use crate::mining::MiningController;
+use crate::snapshot::{ChainSnapshotProvider, Snapshot, SnapshotManager};
 use crate::state::SharedAnvilState;
 use crate::state_dump::SerializableState;
 use crate::time::TimeManager;
@@ -19,11 +20,12 @@ use jsonrpsee::types::{
     error::{INTERNAL_ERROR_CODE, INVALID_PARAMS_CODE},
     ErrorObjectOwned,
 };
+use reth_engine_local::LocalMinerHandle;
 use reth_ethereum::chainspec::{ChainSpec, EthChainSpec, EthereumHardforks};
 use reth_rpc_eth_api::{EthApiServer, FullEthApiServer};
 use reth_storage_api::{AccountReader, BlockNumReader, HeaderProvider, StateDumpProvider};
 use reth_transaction_pool::TransactionPool;
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 use tokio::time::sleep;
 
 /// anvil_* RPC namespace.
@@ -85,6 +87,12 @@ pub trait AnvilApi {
 
     #[method(name = "metadata", aliases = ["hardhat_metadata"])]
     async fn anvil_metadata(&self) -> RpcResult<Metadata>;
+
+    #[method(name = "snapshot", aliases = ["evm_snapshot"])]
+    async fn anvil_snapshot(&self) -> RpcResult<U256>;
+
+    #[method(name = "revert", aliases = ["evm_revert"])]
+    async fn anvil_revert(&self, id: U256) -> RpcResult<bool>;
 
     #[method(name = "setBlockTimestampInterval")]
     async fn anvil_set_block_timestamp_interval(&self, seconds: u64) -> RpcResult<()>;
@@ -159,11 +167,15 @@ pub trait AnvilApi {
 
 /// Implementation of the `anvil_*` RPC namespace.
 #[derive(Debug, Clone)]
-pub struct AnvilRpc<Pool, Provider, Blocks> {
+pub struct AnvilRpc<Pool, Provider, Blocks>
+where
+    Provider: ChainSnapshotProvider,
+{
     state: ImpersonationState,
     mining: MiningController,
     time: TimeManager,
     context: AnvilContext,
+    local_miner: LocalMinerHandle<<Provider as ChainSnapshotProvider>::Header>,
     pool: Pool,
     provider: Provider,
     blocks: Blocks,
@@ -173,6 +185,7 @@ pub struct AnvilRpc<Pool, Provider, Blocks> {
 pub struct AnvilContext {
     anvil_state: SharedAnvilState,
     block_env: BlockEnvOverrides,
+    snapshots: SnapshotManager,
     node: AnvilNodeConfig,
 }
 
@@ -185,6 +198,7 @@ impl AnvilContext {
         Self {
             anvil_state,
             block_env,
+            snapshots: SnapshotManager::default(),
             node,
         }
     }
@@ -222,12 +236,17 @@ impl AnvilNodeConfig {
     }
 }
 
-impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks> {
+impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks>
+where
+    Provider: ChainSnapshotProvider,
+{
+    #[expect(clippy::too_many_arguments, reason = "constructor mirrors node wiring")]
     pub fn new(
         state: ImpersonationState,
         mining: MiningController,
         time: TimeManager,
         context: AnvilContext,
+        local_miner: LocalMinerHandle<<Provider as ChainSnapshotProvider>::Header>,
         pool: Pool,
         provider: Provider,
         blocks: Blocks,
@@ -237,6 +256,7 @@ impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks> {
             mining,
             time,
             context,
+            local_miner,
             pool,
             provider,
             blocks,
@@ -270,7 +290,8 @@ fn normalize_timestamp_input(timestamp: u64) -> u64 {
 
 impl<Pool, Provider, Blocks> AnvilRpc<Pool, Provider, Blocks>
 where
-    Provider: AccountReader + BlockNumReader + StateDumpProvider,
+    Provider: AccountReader + BlockNumReader + ChainSnapshotProvider + StateDumpProvider,
+    <Provider as ChainSnapshotProvider>::Header: Clone + Send + Sync + 'static,
     Blocks: BlockSource<Block = Block> + FullEthApiServer<NetworkTypes = Ethereum>,
 {
     async fn wait_for_block_number(&self, expected: u64) -> RpcResult<()> {
@@ -310,7 +331,10 @@ where
         let start = self.best_block_number()?;
 
         for _ in 0..blocks {
-            self.mining.trigger();
+            self.local_miner
+                .mine_one()
+                .await
+                .map_err(|error| internal_error(format!("failed to mine block: {error}")))?;
         }
 
         let end = start.saturating_add(blocks);
@@ -374,6 +398,44 @@ where
         state
             .encode_gzipped()
             .map_err(|error| internal_error(format!("failed to encode state dump: {error}")))
+    }
+
+    async fn snapshot(&self) -> RpcResult<U256> {
+        let latest = self.latest_block().await?;
+        let snapshot = Snapshot::new(
+            latest.header.number,
+            latest.header.hash,
+            self.context.anvil_state.read().clone(),
+            self.time.snapshot(),
+            self.context.block_env.snapshot(),
+        );
+
+        Ok(self.context.snapshots.insert(snapshot))
+    }
+
+    async fn revert(&self, id: U256) -> RpcResult<bool> {
+        let Some(snapshot) = self.context.snapshots.get(id) else {
+            return Ok(false);
+        };
+
+        let header = self
+            .provider
+            .snapshot_header(&snapshot)
+            .map_err(|error| internal_error(format!("failed to revert chain: {error}")))?;
+        self.local_miner
+            .reset_head(header.clone())
+            .await
+            .map_err(|error| internal_error(format!("failed to reset local miner: {error}")))?;
+        self.provider
+            .finalize_snapshot_revert(&snapshot, header)
+            .map_err(|error| internal_error(format!("failed to revert chain: {error}")))?;
+
+        *self.context.anvil_state.write() = snapshot.anvil_state;
+        self.time.restore(snapshot.time);
+        self.context.block_env.restore(snapshot.block_env);
+        self.context.snapshots.invalidate_from(id);
+
+        Ok(true)
     }
 
     fn load_state(&self, buf: Bytes) -> RpcResult<bool> {
@@ -446,8 +508,16 @@ where
 impl<Pool, Provider, Blocks> AnvilApiServer for AnvilRpc<Pool, Provider, Blocks>
 where
     Pool: TransactionPool + Send + Sync + 'static,
-    Provider:
-        AccountReader + BlockNumReader + HeaderProvider + StateDumpProvider + Send + Sync + 'static,
+    Provider: AccountReader
+        + BlockNumReader
+        + ChainSnapshotProvider
+        + HeaderProvider
+        + StateDumpProvider
+        + Send
+        + Sync
+        + 'static,
+    <Provider as ChainSnapshotProvider>::Header: Clone + Send + Sync + 'static,
+    <Provider as HeaderProvider>::Header: Send + Sync + 'static,
     Blocks: BlockSource<Block = Block> + FullEthApiServer<NetworkTypes = Ethereum>,
 {
     async fn anvil_impersonate_account(&self, address: Address) -> RpcResult<()> {
@@ -605,8 +675,16 @@ where
             latest_block_number: latest.header.number,
             latest_block_hash: latest.header.hash,
             forked_network: None,
-            snapshots: BTreeMap::new(),
+            snapshots: self.context.snapshots.metadata(),
         })
+    }
+
+    async fn anvil_snapshot(&self) -> RpcResult<U256> {
+        self.snapshot().await
+    }
+
+    async fn anvil_revert(&self, id: U256) -> RpcResult<bool> {
+        self.revert(id).await
     }
 
     async fn anvil_set_block_timestamp_interval(&self, seconds: u64) -> RpcResult<()> {

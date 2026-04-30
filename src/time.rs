@@ -3,6 +3,15 @@ use alloy_rpc_types_engine::PayloadAttributes;
 use parking_lot::RwLock;
 use std::{sync::Arc, time::Duration};
 
+/// Restorable timestamp override state.
+#[derive(Clone, Debug)]
+pub struct TimeSnapshot {
+    offset: i128,
+    last_timestamp: u64,
+    next_exact_timestamp: Option<u64>,
+    interval: Option<u64>,
+}
+
 /// Manages block timestamp overrides.
 #[derive(Clone, Debug)]
 pub struct TimeManager {
@@ -123,6 +132,24 @@ impl TimeManager {
     pub fn current_call_timestamp(&self) -> u64 {
         let (next_timestamp, _) = self.compute_next_timestamp();
         next_timestamp
+    }
+
+    /// Captures the current timestamp override state.
+    pub fn snapshot(&self) -> TimeSnapshot {
+        TimeSnapshot {
+            offset: *self.offset.read(),
+            last_timestamp: *self.last_timestamp.read(),
+            next_exact_timestamp: *self.next_exact_timestamp.read(),
+            interval: *self.interval.read(),
+        }
+    }
+
+    /// Restores timestamp overrides from a snapshot.
+    pub fn restore(&self, snapshot: TimeSnapshot) {
+        *self.offset.write() = snapshot.offset;
+        *self.last_timestamp.write() = snapshot.last_timestamp;
+        *self.next_exact_timestamp.write() = snapshot.next_exact_timestamp;
+        *self.interval.write() = snapshot.interval;
     }
 
     /// Returns the local-miner payload attribute mapper for this time manager
