@@ -6,6 +6,7 @@ mod evm;
 mod impersonation;
 mod mining;
 mod pool;
+mod snapshot;
 mod state;
 mod state_dump;
 mod state_provider;
@@ -39,7 +40,7 @@ use jsonrpsee::{
 use mining::{run_automine_task, run_interval_mining_task, MiningController};
 use pool::AnvilPoolBuilder;
 use reth_db_mem::MemoryDatabase;
-use reth_engine_local::MiningMode as LocalMiningMode;
+use reth_engine_local::{LocalMinerHandle, MiningMode as LocalMiningMode};
 use reth_ethereum::{
     chainspec::DEV,
     node::{
@@ -76,6 +77,13 @@ async fn main() -> Result<()> {
     let node_config = NodeConfig::new(DEV.clone())
         .with_unused_ports()
         .dev()
+        .apply(|mut config| {
+            config
+                .engine
+                .always_process_payload_attributes_on_canonical_head = true;
+            config.engine.allow_unwind_canonical_header = true;
+            config
+        })
         .with_storage(StorageArgs { v2: false })
         .with_rpc(RpcServerArgs::default().with_http())
         .with_datadir_args(DatadirArgs {
@@ -87,6 +95,7 @@ async fn main() -> Result<()> {
     let time = TimeManager::new(DEV.genesis_timestamp());
     let block_env = BlockEnvOverrides::default();
     let anvil_state = AnvilState::shared();
+    let (local_miner, local_miner_control) = LocalMinerHandle::new();
     let anvil_context = AnvilContext::new(
         anvil_state.clone(),
         block_env.clone(),
@@ -118,6 +127,7 @@ async fn main() -> Result<()> {
             let mining = mining.clone();
             let time = time.clone();
             let anvil_context = anvil_context.clone();
+            let local_miner = local_miner.clone();
             move |ctx| {
                 ctx.registry
                     .eth_api()
@@ -129,6 +139,7 @@ async fn main() -> Result<()> {
                     mining,
                     time,
                     anvil_context,
+                    local_miner,
                     ctx.pool().clone(),
                     ctx.provider().clone(),
                     ctx.registry.eth_api().clone(),
@@ -141,6 +152,7 @@ async fn main() -> Result<()> {
         .launch_with_debug_capabilities()
         .map_debug_payload_attributes(time.payload_attributes_hook(block_env))
         .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
+        .with_local_miner_control(local_miner_control)
         .await?;
 
     node.task_executor.spawn_critical_task(
@@ -1062,6 +1074,104 @@ mod tests {
                 )
                 .await?;
             assert_eq!(U256::from_be_slice(result.as_ref()), U256::from(42u64));
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_snapshot_and_revert_restore_overrides_and_metadata() -> Result<()> {
+        with_test_client(|client| async move {
+            let account = Address::repeat_byte(0x5A);
+            let original_balance = U256::from(123u64);
+            let original_gas_limit = U256::from(25_000_000u64);
+            let replacement_gas_limit = U256::from(30_000_000u64);
+
+            client
+                .request::<(), _>("anvil_setBalance", rpc_params![account, original_balance])
+                .await?;
+            client
+                .request::<bool, _>("anvil_setBlockGasLimit", rpc_params![original_gas_limit])
+                .await?;
+
+            let snapshot: U256 = client.request("evm_snapshot", rpc_params![]).await?;
+            let snapshot_block_number = block_number(&client).await?;
+            let snapshot_block = get_block(&client, "latest").await?;
+            let snapshot_block_hash = B256::from_str(
+                snapshot_block["hash"]
+                    .as_str()
+                    .ok_or_eyre("missing snapshot hash")?,
+            )?;
+
+            let metadata: Metadata = client.request("anvil_metadata", rpc_params![]).await?;
+            assert_eq!(
+                metadata.snapshots.get(&snapshot),
+                Some(&(snapshot_block_number, snapshot_block_hash))
+            );
+
+            client
+                .request::<(), _>("anvil_setBalance", rpc_params![account, U256::from(1u64)])
+                .await?;
+            client
+                .request::<bool, _>("evm_setBlockGasLimit", rpc_params![replacement_gas_limit])
+                .await?;
+
+            let reverted: bool = client.request("evm_revert", rpc_params![snapshot]).await?;
+            assert!(reverted, "revert should return true for a known snapshot");
+
+            let balance: U256 = client
+                .request("eth_getBalance", rpc_params![account, "latest"])
+                .await?;
+            assert_eq!(balance, original_balance);
+
+            let second_revert: bool = client
+                .request("anvil_revert", rpc_params![snapshot])
+                .await?;
+            assert!(
+                !second_revert,
+                "snapshot ids should be invalidated after a successful revert"
+            );
+
+            let metadata: Metadata = client.request("anvil_metadata", rpc_params![]).await?;
+            assert!(!metadata.snapshots.contains_key(&snapshot));
+
+            client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+            let mined = get_block(&client, "latest").await?;
+            let gas_limit =
+                U256::from_str(mined["gasLimit"].as_str().ok_or_eyre("missing gasLimit")?)?;
+            assert_eq!(gas_limit, original_gas_limit);
+
+            Ok(())
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn anvil_revert_restores_head_and_mines_from_snapshot() -> Result<()> {
+        with_test_client(|client| async move {
+            let initial_block = block_number(&client).await?;
+            let snapshot: U256 = client.request("anvil_snapshot", rpc_params![]).await?;
+
+            client
+                .request::<(), _>("anvil_mine", rpc_params![U256::from(2u64)])
+                .await?;
+            wait_for_block_number(&client, initial_block + 2).await?;
+            assert_eq!(block_number(&client).await?, initial_block + 2);
+
+            let reverted: bool = client
+                .request("anvil_revert", rpc_params![snapshot])
+                .await?;
+            assert!(reverted);
+            assert_eq!(block_number(&client).await?, initial_block);
+
+            client.request::<(), _>("anvil_mine", rpc_params![]).await?;
+            wait_for_block_number(&client, initial_block + 1).await?;
+            assert_eq!(
+                block_number(&client).await?,
+                initial_block + 1,
+                "mining after revert should extend the restored snapshot head"
+            );
 
             Ok(())
         })

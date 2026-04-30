@@ -11,7 +11,7 @@ pub type SharedAnvilState = Arc<RwLock<AnvilState>>;
 ///
 /// This is intentionally kept above Reth storage internals so Anvil semantics do not depend on
 /// table layout details like storage v1/v2.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct AnvilState {
     accounts: HashMap<Address, AccountOverride>,
     bytecodes: HashMap<B256, Bytecode>,
