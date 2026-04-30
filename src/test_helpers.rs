@@ -13,7 +13,7 @@ use alloy_primitives::B256;
 use eyre::{OptionExt, Result};
 use jsonrpsee::http_client::HttpClient;
 use reth_db_mem::MemoryDatabase;
-use reth_engine_local::MiningMode as LocalMiningMode;
+use reth_engine_local::{LocalMinerHandle, MiningMode as LocalMiningMode};
 use reth_ethereum::{
     chainspec::{ChainSpec, DEV},
     node::{
@@ -37,6 +37,13 @@ fn test_node_config() -> NodeConfig<ChainSpec> {
     NodeConfig::test()
         .with_chain(DEV.clone())
         .dev()
+        .apply(|mut config| {
+            config
+                .engine
+                .always_process_payload_attributes_on_canonical_head = true;
+            config.engine.allow_unwind_canonical_header = true;
+            config
+        })
         .with_storage(StorageArgs { v2: false })
         .with_rpc(RpcServerArgs::default().with_unused_ports().with_http())
         .with_datadir_args(DatadirArgs {
@@ -57,6 +64,7 @@ where
     let time = TimeManager::new(DEV.genesis_timestamp());
     let block_env = BlockEnvOverrides::default();
     let anvil_state = AnvilState::shared();
+    let (local_miner, local_miner_control) = LocalMinerHandle::new();
     let anvil_context = AnvilContext::new(
         anvil_state.clone(),
         block_env.clone(),
@@ -86,6 +94,7 @@ where
             let mining = mining.clone();
             let time = time.clone();
             let anvil_context = anvil_context.clone();
+            let local_miner = local_miner.clone();
             move |ctx| {
                 ctx.registry
                     .eth_api()
@@ -97,6 +106,7 @@ where
                     mining,
                     time,
                     anvil_context,
+                    local_miner,
                     ctx.pool().clone(),
                     ctx.provider().clone(),
                     ctx.registry.eth_api().clone(),
@@ -109,6 +119,7 @@ where
         .launch_with_debug_capabilities()
         .map_debug_payload_attributes(time.payload_attributes_hook(block_env))
         .with_mining_mode(LocalMiningMode::trigger(trigger_stream))
+        .with_local_miner_control(local_miner_control)
         .await?;
 
     node.task_executor.spawn_critical_task(
